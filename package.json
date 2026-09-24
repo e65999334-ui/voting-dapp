@@ -1,0 +1,33 @@
+{
+  "name": "ethiopia-chain-zk-voting",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Backend-only research prototype for ZK voting with Circom, Groth16, and Solidity.",
+  "scripts": {
+    "zk:compile": "node scripts/compile-circuit.js",
+    "zk:setup": "node scripts/setup-zk.js",
+    "compile": "cross-env HARDHAT_DISABLE_TELEMETRY_PROMPT=true npm run zk:setup && cross-env HARDHAT_DISABLE_TELEMETRY_PROMPT=true hardhat compile",
+    "test": "npm run compile && cross-env HARDHAT_DISABLE_TELEMETRY_PROMPT=true hardhat test",
+    "test:hardhat": "cross-env HARDHAT_DISABLE_TELEMETRY_PROMPT=true hardhat test --no-compile",
+    "proof": "node scripts/generate-proof.js",
+    "deploy:local": "npm run compile && cross-env HARDHAT_DISABLE_TELEMETRY_PROMPT=true hardhat run scripts/deploy.js"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "5.0.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "circom2": "0.2.23",
+    "cross-env": "^7.0.3",
+    "hardhat": "2.28.0",
+    "snarkjs": "0.7.6",
+    "solidity-coverage": "^0.8.17",
+    "vite": "^8.3.0"
+  },
+  "dependencies": {
+    "circomlib": "2.0.5",
+    "circomlibjs": "0.1.7",
+    "ethers": "^6.17.0",
+    "poseidon-solidity": "^0.0.5",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  }
+}
