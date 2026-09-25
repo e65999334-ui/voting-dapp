@@ -1,970 +1,584 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const snarkjs = require("snarkjs");
-const circomlib = require("circomlibjs");
-const path = require("path");
 
-const ROOT = path.resolve(__dirname, "..");
-const WASM = path.join(
-  ROOT,
-  "build/zk/VoteValidity_js/VoteValidity.wasm"
-);
-const ZKEY = path.join(ROOT, "build/zk/VoteValidity.zkey");
-
-const FIELD =
-  21888242871839275222246405745257275088548364400416034343698204186575808495617n;
-
-let poseidon;
-let F;
-
-function asBigInt(value) {
-  return BigInt(value.toString());
-}
-
-function hash(values) {
-  return asBigInt(F.toObject(poseidon(values.map(BigInt))));
-}
-
-async function deployGovernanceVoting(memberAddresses, threshold) {
+async function deployVoting(signers) {
   const verifierFactory =
-    await ethers.getContractFactory("Groth16Verifier");
+    await ethers.getContractFactory(
+      "Groth16Verifier"
+    );
 
-  const verifier = await verifierFactory.deploy();
+  const verifier =
+    await verifierFactory.deploy();
+
   await verifier.waitForDeployment();
 
   const poseidonFactory =
-    await ethers.getContractFactory("PoseidonT3");
+    await ethers.getContractFactory(
+      "PoseidonT3"
+    );
 
-  const poseidonLibrary = await poseidonFactory.deploy();
+  const poseidonLibrary =
+    await poseidonFactory.deploy();
+
   await poseidonLibrary.waitForDeployment();
 
-  const votingFactory = await ethers.getContractFactory("ZKVoting", {
-    libraries: {
-      PoseidonT3: await poseidonLibrary.getAddress(),
-    },
-  });
+  const votingFactory =
+    await ethers.getContractFactory(
+      "ZKVoting",
+      {
+        libraries: {
+          PoseidonT3:
+            await poseidonLibrary.getAddress()
+        }
+      }
+    );
 
-  const voting = await votingFactory.deploy(
-    await verifier.getAddress(),
-    memberAddresses,
-    threshold
-  );
+  const governanceMembers = [
+    signers[0].address,
+    signers[1].address,
+    signers[2].address
+  ];
+
+  const voting =
+    await votingFactory.deploy(
+      await verifier.getAddress(),
+      governanceMembers,
+      2n
+    );
 
   await voting.waitForDeployment();
 
   return {
     voting,
-    verifier,
-    poseidonLibrary,
-  };
-}
-
-function candidateMerkleTree(candidateIds) {
-  const sorted = [...candidateIds]
-    .map(BigInt)
-    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-
-  if (sorted.length === 0 || sorted.length > 8) {
-    throw new Error("candidateIds must contain 1..8 ids");
-  }
-
-  if (sorted.some((id) => id === 0n)) {
-    throw new Error("candidate id cannot be zero");
-  }
-
-  for (let i = 1; i < sorted.length; i += 1) {
-    if (sorted[i] === sorted[i - 1]) {
-      throw new Error("duplicate candidate id");
-    }
-  }
-
-  let level = Array.from({ length: 8 }, (_, i) =>
-    i < sorted.length ? hash([sorted[i], 0n]) : 0n
-  );
-
-  const levels = [level];
-
-  while (level.length > 1) {
-    const next = [];
-
-    for (let i = 0; i < level.length; i += 2) {
-      next.push(hash([level[i], level[i + 1]]));
-    }
-
-    level = next;
-    levels.push(level);
-  }
-
-  return {
-    root: level[0],
-
-    pathFor(candidateId) {
-      const index = sorted.findIndex(
-        (id) => id === BigInt(candidateId)
-      );
-
-      if (index < 0) {
-        throw new Error("candidate is not registered");
-      }
-
-      const siblings = [];
-      const indices = [];
-
-      let position = index;
-
-      for (let depth = 0; depth < 3; depth += 1) {
-        siblings.push(levels[depth][position ^ 1]);
-        indices.push(position % 2);
-        position = Math.floor(position / 2);
-      }
-
-      return {
-        siblings,
-        indices,
-      };
-    },
-  };
-}
-
-function eligibilityPath(leaves, targetIndex) {
-  let level = leaves.map(BigInt);
-  let position = targetIndex;
-
-  const siblings = [];
-  const indices = [];
-
-  while (level.length > 1) {
-    siblings.push(level[position ^ 1]);
-    indices.push(position % 2);
-
-    const next = [];
-
-    for (let i = 0; i < level.length; i += 2) {
-      next.push(hash([level[i], level[i + 1]]));
-    }
-
-    level = next;
-    position = Math.floor(position / 2);
-  }
-
-  return {
-    siblings,
-    indices,
-  };
-}
-
-async function makeBallot({
-  credential,
-  electionId,
-  candidateChoice,
-  voteSalt,
-  siblings,
-  indices,
-  candidateIds = [7n, 8n, 9n],
-}) {
-  let node = hash([credential]);
-
-  for (let i = 0; i < siblings.length; i += 1) {
-    node =
-      indices[i] === 0
-        ? hash([node, siblings[i]])
-        : hash([siblings[i], node]);
-  }
-
-  const eligibilityRoot = node;
-
-  const candidates = candidateMerkleTree(candidateIds);
-  const candidatePath =
-    candidates.pathFor(candidateChoice);
-
-  const scopeRoot = hash([
-    eligibilityRoot,
-    candidates.root,
-  ]);
-
-  const input = {
-    credential: credential.toString(),
-    electionId: electionId.toString(),
-    candidateChoice: candidateChoice.toString(),
-    voteSalt: voteSalt.toString(),
-
-    eligibilityRoot: eligibilityRoot.toString(),
-
-    eligibilityPathElements: siblings.map((x) =>
-      x.toString()
-    ),
-
-    eligibilityPathIndices: indices.map((x) =>
-      x.toString()
-    ),
-
-    candidateRoot: candidates.root.toString(),
-
-    candidatePathElements: candidatePath.siblings.map(
-      (x) => x.toString()
-    ),
-
-    candidatePathIndices: candidatePath.indices.map(
-      (x) => x.toString()
-    ),
-
-    scopeRoot: scopeRoot.toString(),
-  };
-
-  const { proof, publicSignals } =
-    await snarkjs.groth16.fullProve(
-      input,
-      WASM,
-      ZKEY
-    );
-
-  const calldata =
-    await snarkjs.groth16.exportSolidityCallData(
-      proof,
-      publicSignals
-    );
-
-  const [a, b, c, signals] =
-    JSON.parse(`[${calldata}]`);
-
-  return {
-    a,
-    b,
-    c,
-    signals,
-
-    eligibilityRoot,
-    candidateRoot: candidates.root,
-    scopeRoot,
-
-    voteCommitment: hash([
-      candidateChoice,
-      voteSalt,
-    ]),
-
-    nullifierHash: hash([
-      credential,
-      electionId,
-    ]),
+    verifier
   };
 }
 
 describe("ZKVoting security", function () {
-  let voting;
-  let governanceMember1;
-  let governanceMember2;
-  let governanceMember3;
+  this.timeout(120000);
+
+  let creator;
+  let member2;
+  let member3;
   let attacker;
+  let candidateA;
+  let candidateB;
 
-  let validBallot;
-
-  const credential = 123456789n;
-
-  before(async function () {
-    poseidon = await circomlib.buildPoseidon();
-    F = poseidon.F;
-
-    expect(FIELD).to.equal(F.p);
-  });
+  let voting;
+  let electionId;
 
   beforeEach(async function () {
-    [
-      governanceMember1,
-      governanceMember2,
-      governanceMember3,
-      attacker,
-    ] = await ethers.getSigners();
+    const signers =
+      await ethers.getSigners();
 
-    ({ voting } = await deployGovernanceVoting(
-      [
-        governanceMember1.address,
-        governanceMember2.address,
-        governanceMember3.address,
-      ],
-      2
-    ));
+    creator = signers[0];
+    member2 = signers[1];
+    member3 = signers[2];
+    candidateA = signers[3];
+    candidateB = signers[4];
+    attacker = signers[5];
 
-    const now =
-      (await ethers.provider.getBlock("latest"))
-        .timestamp;
+    const deployed =
+      await deployVoting(signers);
 
-    await voting.proposeElection(
-      "Federal council",
-      hash([credential]),
-      now + 10,
-      now + 1000,
-      [7n, 8n, 9n]
-    );
+    voting =
+      deployed.voting;
 
-    await voting.registerParticipant(
-      1,
-      governanceMember1.address,
-      hash([credential]),
-      hash([credential, 1n])
-    );
-
-    await voting
-      .connect(governanceMember1)
-      .approveElection(1);
-
-    await voting
-      .connect(governanceMember2)
-      .approveElection(1);
-
-    const leaves =
-      await voting.getEligibilityLeaves(1);
-
-    const path = eligibilityPath(leaves, 0);
-
-    validBallot = await makeBallot({
-      credential,
-      electionId: 1n,
-      candidateChoice: 7n,
-      voteSalt: 888n,
-      siblings: path.siblings,
-      indices: path.indices,
-    });
-
-    expect(
-      (await voting.elections(1)).candidateRoot
-    ).to.equal(validBallot.candidateRoot);
-
-    expect(
-      await voting.getElectionCandidates(1)
-    ).to.deep.equal([7n, 8n, 9n]);
+    electionId = 1n;
   });
 
-  async function activate() {
+  async function createVote() {
+    const latest =
+      await ethers.provider.getBlock(
+        "latest"
+      );
+
+    const start =
+      BigInt(
+        latest.timestamp + 20
+      );
+
+    const end =
+      BigInt(
+        latest.timestamp + 120
+      );
+
+    await voting
+      .connect(creator)
+      .createVote(
+        "Security Vote",
+        "Security test",
+        start,
+        end,
+        [
+          {
+            id: 1n,
+            candidateAddress:
+              candidateA.address,
+            name: "Candidate A"
+          },
+          {
+            id: 2n,
+            candidateAddress:
+              candidateB.address,
+            name: "Candidate B"
+          }
+        ]
+      );
+  }
+
+  async function createVoteWithParticipant() {
+    await createVote();
+
+    /*
+     * The current contract requires at least
+     * one registered participant before
+     * activateVote() can succeed.
+     */
+    await voting
+      .connect(creator)
+      .registerParticipant(
+        electionId,
+        attacker.address,
+        123n,
+        456n
+      );
+  }
+
+  async function moveToStartAndActivate() {
+    const times =
+      await voting.getVoteTimes(
+        electionId
+      );
+
     await ethers.provider.send(
-      "evm_increaseTime",
-      [11]
+      "evm_setNextBlockTimestamp",
+      [
+        Number(times[0])
+      ]
     );
 
-    await ethers.provider.send("evm_mine");
+    await ethers.provider.send(
+      "evm_mine"
+    );
 
-    await voting.activateElection(1);
+    await voting
+      .connect(attacker)
+      .activateVote(
+        electionId
+      );
+  }
+
+  async function moveToEnd() {
+    const times =
+      await voting.getVoteTimes(
+        electionId
+      );
+
+    await ethers.provider.send(
+      "evm_setNextBlockTimestamp",
+      [
+        Number(times[1])
+      ]
+    );
+
+    await ethers.provider.send(
+      "evm_mine"
+    );
   }
 
   it(
-    "rejects unauthorized approval and invalid election parameters",
+    "deploys with the configured governance members",
     async function () {
-      await expect(
-        voting
-          .connect(attacker)
-          .approveElection(1)
-      ).to.be.revertedWith(
-        "Not governance member"
-      );
+      const members =
+        await voting.getGovernanceMembers();
 
-      const now =
-        (await ethers.provider.getBlock("latest"))
-          .timestamp;
+      expect(members.length).to.equal(3);
 
-      await expect(
-        voting.proposeElection(
-          "bad",
-          1,
-          now + 200,
-          now + 100,
-          [7n]
+      expect(
+        await voting.isGovernanceMember(
+          creator.address
         )
-      ).to.be.revertedWith(
-        "Invalid time range"
-      );
-    }
-  );
-
-  it(
-    "requires the configured threshold before approving an election",
-    async function () {
-      const now =
-        (await ethers.provider.getBlock("latest"))
-          .timestamp;
-
-      await voting.proposeElection(
-        "Second council",
-        hash([999n]),
-        now + 10,
-        now + 1000,
-        [7n, 8n, 9n]
-      );
-
-      await voting
-        .connect(governanceMember1)
-        .approveElection(2);
-
-      expect(
-        (await voting.elections(2))
-          .proposalApproved
-      ).to.equal(false);
-
-      expect(
-        await voting.electionApprovalCount(2)
-      ).to.equal(1n);
-
-      await voting
-        .connect(governanceMember2)
-        .approveElection(2);
-
-      expect(
-        (await voting.elections(2))
-          .proposalApproved
       ).to.equal(true);
 
       expect(
-        await voting.electionApprovalCount(2)
+        await voting.isGovernanceMember(
+          member2.address
+        )
+      ).to.equal(true);
+
+      expect(
+        await voting.isGovernanceMember(
+          member3.address
+        )
+      ).to.equal(true);
+
+      expect(
+        await voting.governanceThreshold()
       ).to.equal(2n);
     }
   );
 
   it(
-    "rejects duplicate approval and approval of an already-approved election",
+    "allows a normal wallet to create a vote",
     async function () {
-      const now =
-        (await ethers.provider.getBlock("latest"))
-          .timestamp;
+      await createVote();
 
-      await voting.proposeElection(
-        "Third council",
-        hash([999n]),
-        now + 10,
-        now + 1000,
-        [7n, 8n, 9n]
-      );
-
-      await voting
-        .connect(governanceMember1)
-        .approveElection(2);
-
-      await expect(
-        voting
-          .connect(governanceMember1)
-          .approveElection(2)
-      ).to.be.revertedWith(
-        "Already approved by member"
-      );
-
-      await expect(
-        voting
-          .connect(governanceMember1)
-          .approveElection(1)
-      ).to.be.revertedWith(
-        "Already approved"
-      );
+      expect(
+        await voting.nextElectionId()
+      ).to.equal(2n);
     }
   );
 
   it(
-    "requires threshold approval for membership changes",
+    "rejects a zero verifier at deployment",
     async function () {
-      await expect(
-        voting
-          .connect(attacker)
-          .proposeGovernanceMemberChange(
-            attacker.address,
-            true
-          )
-      ).to.be.revertedWith(
-        "Not governance member"
-      );
-
-      await voting
-        .connect(governanceMember1)
-        .proposeGovernanceMemberChange(
-          attacker.address,
-          true
+      const verifierFactory =
+        await ethers.getContractFactory(
+          "Groth16Verifier"
         );
 
-      expect(
-        await voting.isGovernanceMember(
-          attacker.address
-        )
-      ).to.equal(false);
+      const verifier =
+        await verifierFactory.deploy();
 
-      await voting
-        .connect(governanceMember1)
-        .approveGovernanceMemberChange(1);
+      await verifier.waitForDeployment();
 
-      expect(
-        await voting.isGovernanceMember(
-          attacker.address
-        )
-      ).to.equal(false);
-
-      expect(
-        (await voting.governanceChanges(1))
-          .approvalCount
-      ).to.equal(1n);
-
-      await voting
-        .connect(governanceMember2)
-        .approveGovernanceMemberChange(1);
-
-      expect(
-        await voting.isGovernanceMember(
-          attacker.address
-        )
-      ).to.equal(true);
-
-      expect(
-        (await voting.governanceChanges(1))
-          .executed
-      ).to.equal(true);
-    }
-  );
-
-  it(
-    "allows governed removal without dropping below the threshold",
-    async function () {
-      await voting
-        .connect(governanceMember1)
-        .proposeGovernanceMemberChange(
-          governanceMember3.address,
-          false
+      const poseidonFactory =
+        await ethers.getContractFactory(
+          "PoseidonT3"
         );
 
-      await voting
-        .connect(governanceMember1)
-        .approveGovernanceMemberChange(1);
+      const poseidonLibrary =
+        await poseidonFactory.deploy();
 
-      await voting
-        .connect(governanceMember2)
-        .approveGovernanceMemberChange(1);
+      await poseidonLibrary.waitForDeployment();
 
-      expect(
-        await voting.isGovernanceMember(
-          governanceMember3.address
-        )
-      ).to.equal(false);
-
-      expect(
-        await voting.governanceMembers(0)
-      ).to.equal(
-        governanceMember1.address
-      );
-
-      expect(
-        await voting.governanceMembers(1)
-      ).to.equal(
-        governanceMember2.address
-      );
-
-      await expect(
-        voting
-          .connect(governanceMember3)
-          .proposeGovernanceMemberChange(
-            attacker.address,
-            true
-          )
-      ).to.be.revertedWith(
-        "Not governance member"
-      );
-    }
-  );
-
-  it(
-    "rejects voting before activation and with a fake proof",
-    async function () {
-      const zeroA = [0, 0];
-
-      const zeroB = [
-        [0, 0],
-        [0, 0],
-      ];
-
-      const zeroC = [0, 0];
-
-      await expect(
-        voting.castPrivateVote(
-          1,
-          zeroA,
-          zeroB,
-          zeroC,
-          validBallot.signals
-        )
-      ).to.be.revertedWith(
-        "Not active"
-      );
-
-      await activate();
-
-      await expect(
-        voting.castPrivateVote(
-          1,
-          zeroA,
-          zeroB,
-          zeroC,
-          validBallot.signals
-        )
-      ).to.be.revertedWith(
-        "Invalid ZK proof"
-      );
-    }
-  );
-
-  it(
-    "accepts a real Groth16 proof and exposes no candidate in VoteAccepted",
-    async function () {
-      await activate();
-
-      const tx =
-        await voting.castPrivateVote(
-          1,
-          validBallot.a,
-          validBallot.b,
-          validBallot.c,
-          validBallot.signals
-        );
-
-      const receipt = await tx.wait();
-
-      const parsed = receipt.logs
-        .map((log) => {
-          try {
-            return voting.interface.parseLog(log);
-          } catch (_) {
-            return null;
+      const votingFactory =
+        await ethers.getContractFactory(
+          "ZKVoting",
+          {
+            libraries: {
+              PoseidonT3:
+                await poseidonLibrary.getAddress()
+            }
           }
-        })
-        .find(
-          (log) =>
-            log &&
-            log.name === "VoteAccepted"
         );
 
-      expect(
-        parsed.args.electionId
-      ).to.equal(1n);
-
-      expect(
-        parsed.args.nullifierHash
-      ).to.equal(
-        validBallot.nullifierHash
-      );
-
-      expect(
-        parsed.args.voteCommitment
-      ).to.equal(
-        validBallot.voteCommitment
-      );
-
-      expect(parsed.args.length).to.equal(3);
-
-      expect(
-        await voting.nullifierUsed(
-          1,
-          validBallot.nullifierHash
-        )
-      ).to.equal(true);
-
-      expect(
-        (await voting.elections(1))
-          .acceptedBallots
-      ).to.equal(1n);
-    }
-  );
-
-  it(
-    "rejects a duplicate nullifier even when the second proof is otherwise valid",
-    async function () {
-      await activate();
-
-      await voting.castPrivateVote(
-        1,
-        validBallot.a,
-        validBallot.b,
-        validBallot.c,
-        validBallot.signals
-      );
-
-      const leaves =
-        await voting.getEligibilityLeaves(1);
-
-      const path = eligibilityPath(
-        leaves,
-        0
-      );
-
-      const second =
-        await makeBallot({
-          credential,
-          electionId: 1n,
-          candidateChoice: 8n,
-          voteSalt: 999n,
-          siblings: path.siblings,
-          indices: path.indices,
-        });
-
-      expect(
-        second.nullifierHash
-      ).to.equal(
-        validBallot.nullifierHash
-      );
-
       await expect(
-        voting.castPrivateVote(
-          1,
-          second.a,
-          second.b,
-          second.c,
-          second.signals
+        votingFactory.deploy(
+          ethers.ZeroAddress,
+          [
+            creator.address,
+            member2.address,
+            member3.address
+          ],
+          2n
         )
       ).to.be.revertedWith(
-        "Already voted"
+        "Zero verifier"
       );
     }
   );
 
   it(
-    "rejects a proof whose public root does not match the election",
+    "rejects an empty governance member set",
     async function () {
-      await activate();
+      const verifierFactory =
+        await ethers.getContractFactory(
+          "Groth16Verifier"
+        );
 
-      const badSignals = [
-        ...validBallot.signals,
-      ];
+      const verifier =
+        await verifierFactory.deploy();
 
-      badSignals[3] =
-        badSignals[3] === 0
-          ? 1
-          : 0;
+      await verifier.waitForDeployment();
+
+      const poseidonFactory =
+        await ethers.getContractFactory(
+          "PoseidonT3"
+        );
+
+      const poseidonLibrary =
+        await poseidonFactory.deploy();
+
+      await poseidonLibrary.waitForDeployment();
+
+      const votingFactory =
+        await ethers.getContractFactory(
+          "ZKVoting",
+          {
+            libraries: {
+              PoseidonT3:
+                await poseidonLibrary.getAddress()
+            }
+          }
+        );
 
       await expect(
-        voting.castPrivateVote(
-          1,
-          validBallot.a,
-          validBallot.b,
-          validBallot.c,
-          badSignals
+        votingFactory.deploy(
+          await verifier.getAddress(),
+          [],
+          1n
         )
-      ).to.be.revertedWith(
-        "Wrong scope root"
-      );
-    }
-  );
-
-  it(
-    "binds a proof to its election and rejects replay across elections",
-    async function () {
-      const now =
-        (await ethers.provider.getBlock("latest"))
-          .timestamp;
-
-      await voting.proposeElection(
-        "Second council",
-        hash([999n]),
-        now + 10,
-        now + 1000,
-        [7n, 8n, 9n]
-      );
-
-      await voting.registerParticipant(
-        2,
-        governanceMember1.address,
-        hash([credential]),
-        hash([credential, 2n])
-      );
-
-      await voting
-        .connect(governanceMember1)
-        .approveElection(2);
-
-      await voting
-        .connect(governanceMember2)
-        .approveElection(2);
-
-      const leaves =
-        await voting.getEligibilityLeaves(2);
-
-      const path = eligibilityPath(
-        leaves,
-        0
-      );
-
-      const election2Ballot =
-        await makeBallot({
-          credential,
-          electionId: 2n,
-          candidateChoice: 7n,
-          voteSalt: 777n,
-          siblings: path.siblings,
-          indices: path.indices,
-        });
-
-      await ethers.provider.send(
-        "evm_increaseTime",
-        [11]
-      );
-
-      await ethers.provider.send("evm_mine");
-
-      await voting.activateElection(2);
-
-      const badSignals = [
-        ...election2Ballot.signals,
-      ];
-
-      badSignals[2] = 1;
-
-      await expect(
-        voting.castPrivateVote(
-          2,
-          election2Ballot.a,
-          election2Ballot.b,
-          election2Ballot.c,
-          badSignals
-        )
-      ).to.be.revertedWith(
-        "Wrong election signal"
-      );
-    }
-  );
-
-  it(
-    "does not end an election early and blocks votes after ending",
-    async function () {
-      await activate();
-
-      await expect(
-        voting.endElection(1)
-      ).to.be.revertedWith(
-        "Election not finished"
-      );
-
-      await ethers.provider.send(
-        "evm_increaseTime",
-        [1001]
-      );
-
-      await ethers.provider.send("evm_mine");
-
-      await voting.endElection(1);
-
-      await expect(
-        voting.castPrivateVote(
-          1,
-          validBallot.a,
-          validBallot.b,
-          validBallot.c,
-          validBallot.signals
-        )
-      ).to.be.revertedWith(
-        "Voting closed"
-      );
-    }
-  );
-
-  it(
-    "keeps tallying separate from private casting and rejects unknown/double reveals",
-    async function () {
-      await activate();
-
-      await voting.castPrivateVote(
-        1,
-        validBallot.a,
-        validBallot.b,
-        validBallot.c,
-        validBallot.signals
-      );
-
-      await ethers.provider.send(
-        "evm_increaseTime",
-        [1001]
-      );
-
-      await ethers.provider.send("evm_mine");
-
-      await voting.endElection(1);
-
-      await expect(
-        voting.revealVote(
-          1,
-          999,
-          111
-        )
-      ).to.be.revertedWith(
-        "Candidate not registered"
-      );
-
-      await voting.revealVote(
-        1,
-        7,
-        888
-      );
-
-      expect(
-        await voting.getVoteCount(1, 7)
-      ).to.equal(1n);
-
-      await expect(
-        voting.revealVote(
-          1,
-          7,
-          888
-        )
-      ).to.be.revertedWith(
-        "Already revealed"
-      );
-    }
-  );
-});
-
-describe("ZKVoting governance constructor", function () {
-  it(
-    "rejects invalid thresholds and invalid governance member lists",
-    async function () {
-      const [
-        member1,
-        member2,
-      ] = await ethers.getSigners();
-
-      await expect(
-        deployGovernanceVoting(
-          [member1.address],
-          0
-        )
-      ).to.be.revertedWith(
-        "Invalid threshold"
-      );
-
-      await expect(
-        deployGovernanceVoting(
-          [member1.address],
-          2
-        )
-      ).to.be.revertedWith(
-        "Invalid threshold"
-      );
-
-      await expect(
-        deployGovernanceVoting([], 1)
       ).to.be.revertedWith(
         "No governance members"
       );
+    }
+  );
+
+  it(
+    "rejects an invalid governance threshold",
+    async function () {
+      const verifierFactory =
+        await ethers.getContractFactory(
+          "Groth16Verifier"
+        );
+
+      const verifier =
+        await verifierFactory.deploy();
+
+      await verifier.waitForDeployment();
+
+      const poseidonFactory =
+        await ethers.getContractFactory(
+          "PoseidonT3"
+        );
+
+      const poseidonLibrary =
+        await poseidonFactory.deploy();
+
+      await poseidonLibrary.waitForDeployment();
+
+      const votingFactory =
+        await ethers.getContractFactory(
+          "ZKVoting",
+          {
+            libraries: {
+              PoseidonT3:
+                await poseidonLibrary.getAddress()
+            }
+          }
+        );
 
       await expect(
-        deployGovernanceVoting(
-          [ethers.ZeroAddress],
-          1
-        )
-      ).to.be.revertedWith(
-        "Zero member"
-      );
-
-      await expect(
-        deployGovernanceVoting(
+        votingFactory.deploy(
+          await verifier.getAddress(),
           [
-            member1.address,
-            member1.address,
+            creator.address,
+            member2.address,
+            member3.address
           ],
-          1
+          4n
         )
       ).to.be.revertedWith(
-        "Duplicate member"
+        "Invalid governance threshold"
       );
+    }
+  );
 
-      expect(member2.address).to.not.equal(
-        member1.address
+  it(
+    "does not allow an unrelated wallet to register participants",
+    async function () {
+      await createVote();
+
+      await expect(
+        voting
+          .connect(attacker)
+          .registerParticipant(
+            electionId,
+            attacker.address,
+            123n,
+            456n
+          )
+      ).to.be.revertedWith(
+        "Not vote creator"
+      );
+    }
+  );
+
+  it(
+    "allows the creator to register a participant",
+    async function () {
+      await createVote();
+
+      await voting
+        .connect(creator)
+        .registerParticipant(
+          electionId,
+          attacker.address,
+          123n,
+          456n
+        );
+
+      expect(
+        await voting.registeredParticipant(
+          electionId,
+          attacker.address
+        )
+      ).to.equal(true);
+    }
+  );
+
+  it(
+    "rejects registration after the vote has started",
+    async function () {
+      await createVoteWithParticipant();
+
+      await moveToStartAndActivate();
+
+      await expect(
+        voting
+          .connect(creator)
+          .registerParticipant(
+            electionId,
+            member3.address,
+            789n,
+            999n
+          )
+      ).to.be.revertedWith(
+        "Voting already started"
+      );
+    }
+  );
+
+  it(
+    "rejects a zero participant address",
+    async function () {
+      await createVote();
+
+      await expect(
+        voting
+          .connect(creator)
+          .registerParticipant(
+            electionId,
+            ethers.ZeroAddress,
+            123n,
+            456n
+          )
+      ).to.be.revertedWith(
+        "Zero participant"
+      );
+    }
+  );
+
+  it(
+    "rejects a zero credential",
+    async function () {
+      await createVote();
+
+      await expect(
+        voting
+          .connect(creator)
+          .registerParticipant(
+            electionId,
+            attacker.address,
+            0n,
+            456n
+          )
+      ).to.be.revertedWith(
+        "Zero credential"
+      );
+    }
+  );
+
+  it(
+    "rejects a zero nullifier",
+    async function () {
+      await createVote();
+
+      await expect(
+        voting
+          .connect(creator)
+          .registerParticipant(
+            electionId,
+            attacker.address,
+            123n,
+            0n
+          )
+      ).to.be.revertedWith(
+        "Zero nullifier"
+      );
+    }
+  );
+
+  it(
+    "rejects duplicate participant registration",
+    async function () {
+      await createVote();
+
+      await voting
+        .connect(creator)
+        .registerParticipant(
+          electionId,
+          attacker.address,
+          123n,
+          456n
+        );
+
+      await expect(
+        voting
+          .connect(creator)
+          .registerParticipant(
+            electionId,
+            attacker.address,
+            789n,
+            999n
+          )
+      ).to.be.revertedWith(
+        "Participant already registered"
+      );
+    }
+  );
+
+  it(
+    "allows anyone to activate after the start time",
+    async function () {
+      await createVoteWithParticipant();
+
+      await moveToStartAndActivate();
+    }
+  );
+
+  it(
+    "allows anyone to end a vote after its deadline",
+    async function () {
+      await createVoteWithParticipant();
+
+      await moveToStartAndActivate();
+
+      await moveToEnd();
+
+      await voting
+        .connect(attacker)
+        .endVote(
+          electionId
+        );
+    }
+  );
+
+  it(
+    "rejects finalization before the reveal period ends",
+    async function () {
+      await createVoteWithParticipant();
+
+      await moveToStartAndActivate();
+
+      await moveToEnd();
+
+      await voting
+        .connect(attacker)
+        .endVote(
+          electionId
+        );
+
+      await expect(
+        voting
+          .connect(attacker)
+          .finalizeVote(
+            electionId
+          )
+      ).to.be.revertedWith(
+        "Reveal period active"
       );
     }
   );

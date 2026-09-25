@@ -19,808 +19,708 @@ const ZKEY = path.join(
 let poseidon;
 let F;
 
-function asBigInt(value) {
-  return BigInt(value.toString());
-}
-
 function hash(values) {
-  return asBigInt(
+  return BigInt(
     F.toObject(
       poseidon(values.map(BigInt))
-    )
+    ).toString()
   );
 }
 
-function eligibilityMerkleTree(leaves) {
-  let level = Array.from(
-    { length: 8 },
-    (_, i) => BigInt(leaves[i] || 0)
-  );
+function buildMerkleTree(leaves) {
+  if (leaves.length !== 8) {
+    throw new Error("Expected 8 leaves");
+  }
 
-  const levels = [level];
+  const tree = [[...leaves]];
 
-  while (level.length > 1) {
+  for (let level = 0; level < 3; level++) {
+    const current = tree[level];
     const next = [];
 
-    for (let i = 0; i < level.length; i += 2) {
+    for (let i = 0; i < current.length; i += 2) {
       next.push(
         hash([
-          level[i],
-          level[i + 1]
+          current[i],
+          current[i + 1]
         ])
       );
     }
 
-    level = next;
-    levels.push(level);
+    tree.push(next);
+  }
+
+  return tree;
+}
+
+function getMerklePath(tree, index) {
+  const pathElements = [];
+  const pathIndices = [];
+
+  let currentIndex = index;
+
+  for (let level = 0; level < 3; level++) {
+    const siblingIndex =
+      currentIndex % 2 === 0
+        ? currentIndex + 1
+        : currentIndex - 1;
+
+    pathElements.push(
+      tree[level][siblingIndex]
+    );
+
+    pathIndices.push(
+      currentIndex % 2
+    );
+
+    currentIndex =
+      Math.floor(currentIndex / 2);
   }
 
   return {
-    root: level[0],
-
-    pathFor(index) {
-      const siblings = [];
-      const indices = [];
-
-      let position = Number(index);
-
-      for (
-        let depth = 0;
-        depth < 3;
-        depth += 1
-      ) {
-        siblings.push(
-          levels[depth][position ^ 1]
-        );
-
-        indices.push(
-          position % 2
-        );
-
-        position =
-          Math.floor(position / 2);
-      }
-
-      return {
-        siblings,
-        indices
-      };
-    }
+    pathElements,
+    pathIndices
   };
 }
 
-function candidateMerkleTree(candidateIds) {
-  const sorted = [...candidateIds]
-    .map(BigInt)
-    .sort(
-      (a, b) =>
-        a < b ? -1 :
-        a > b ? 1 : 0
+async function deployVoting(signers) {
+  const verifierFactory =
+    await ethers.getContractFactory(
+      "Groth16Verifier"
     );
 
-  if (
-    sorted.length === 0 ||
-    sorted.length > 8
-  ) {
-    throw new Error(
-      "candidateIds must contain 1..8 ids"
+  const verifier =
+    await verifierFactory.deploy();
+
+  await verifier.waitForDeployment();
+
+  const poseidonFactory =
+    await ethers.getContractFactory(
+      "PoseidonT3"
     );
-  }
 
-  if (
-    sorted.some(
-      (id) => id === 0n
-    )
-  ) {
-    throw new Error(
-      "candidate id cannot be zero"
+  const poseidonLibrary =
+    await poseidonFactory.deploy();
+
+  await poseidonLibrary.waitForDeployment();
+
+  const votingFactory =
+    await ethers.getContractFactory(
+      "ZKVoting",
+      {
+        libraries: {
+          PoseidonT3:
+            await poseidonLibrary.getAddress()
+        }
+      }
     );
-  }
 
-  for (
-    let i = 1;
-    i < sorted.length;
-    i += 1
-  ) {
-    if (
-      sorted[i] === sorted[i - 1]
-    ) {
-      throw new Error(
-        "duplicate candidate id"
-      );
-    }
-  }
+  const governanceMembers = [
+    signers[0].address,
+    signers[1].address,
+    signers[2].address
+  ];
 
-  let level = Array.from(
-    { length: 8 },
-    (_, i) =>
-      i < sorted.length
-        ? hash([
-            sorted[i],
-            0n
-          ])
-        : 0n
-  );
+  const voting =
+    await votingFactory.deploy(
+      await verifier.getAddress(),
+      governanceMembers,
+      2n
+    );
 
-  const levels = [level];
-
-  while (level.length > 1) {
-    const next = [];
-
-    for (
-      let i = 0;
-      i < level.length;
-      i += 2
-    ) {
-      next.push(
-        hash([
-          level[i],
-          level[i + 1]
-        ])
-      );
-    }
-
-    level = next;
-    levels.push(level);
-  }
+  await voting.waitForDeployment();
 
   return {
-    root: level[0],
+    voting,
+    verifier
+  };
+}
 
-    pathFor(candidateId) {
-      const index =
-        sorted.findIndex(
-          (id) =>
-            id === BigInt(candidateId)
+describe("ZKVoting end-to-end", function () {
+  this.timeout(120000);
+
+  let creator;
+  let voter;
+  let voter2;
+  let attacker;
+  let alice;
+  let bob;
+
+  let voting;
+  let electionId;
+
+  const credential = 123456789n;
+  const credential2 = 987654321n;
+  const candidateChoice = 1n;
+  const voteSalt = 111222333n;
+
+  before(async function () {
+    poseidon =
+      await circomlib.buildPoseidon();
+
+    F = poseidon.F;
+  });
+
+  beforeEach(async function () {
+    const signers =
+      await ethers.getSigners();
+
+    creator = signers[0];
+    voter = signers[1];
+    voter2 = signers[2];
+    alice = signers[3];
+    bob = signers[4];
+    attacker = signers[5];
+
+    const deployed =
+      await deployVoting(signers);
+
+    voting = deployed.voting;
+
+    electionId = 1n;
+
+    const latest =
+      await ethers.provider.getBlock(
+        "latest"
+      );
+
+    const start =
+      BigInt(latest.timestamp + 20);
+
+    const end =
+      BigInt(latest.timestamp + 120);
+
+    await voting
+      .connect(creator)
+      .createVote(
+        "E2E Test",
+        "End to end ZK vote",
+        start,
+        end,
+        [
+          {
+            id: 1n,
+            candidateAddress:
+              alice.address,
+            name: "Alice"
+          },
+          {
+            id: 2n,
+            candidateAddress:
+              bob.address,
+            name: "Bob"
+          }
+        ]
+      );
+
+    await voting
+      .connect(creator)
+      .registerParticipant(
+        electionId,
+        voter.address,
+        hash([credential]),
+        hash([
+          credential,
+          electionId
+        ])
+      );
+
+    await voting
+      .connect(creator)
+      .registerParticipant(
+        electionId,
+        voter2.address,
+        hash([credential2]),
+        hash([
+          credential2,
+          electionId
+        ])
+      );
+  });
+
+  async function activateVote() {
+    const times =
+      await voting.getVoteTimes(
+        electionId
+      );
+
+    await ethers.provider.send(
+      "evm_setNextBlockTimestamp",
+      [
+        Number(times[0])
+      ]
+    );
+
+    await ethers.provider.send(
+      "evm_mine"
+    );
+
+    await voting
+      .connect(attacker)
+      .activateVote(
+        electionId
+      );
+  }
+
+  async function generateProof({
+    credentialValue = credential,
+    candidate = candidateChoice,
+    salt = voteSalt,
+    participantIndex = 0
+  } = {}) {
+    const leavesRaw =
+      await voting.getEligibilityLeaves(
+        electionId
+      );
+
+    const eligibilityLeaves =
+      leavesRaw.map(
+        x => BigInt(x.toString())
+      );
+
+    const eligibilityTree =
+      buildMerkleTree(
+        eligibilityLeaves
+      );
+
+    const roots =
+      await voting.getVoteRoots(
+        electionId
+      );
+
+    const eligibilityRoot =
+      BigInt(
+        roots[0].toString()
+      );
+
+    const candidateRoot =
+      BigInt(
+        roots[1].toString()
+      );
+
+    const eligibilityPath =
+      getMerklePath(
+        eligibilityTree,
+        participantIndex
+      );
+
+    const candidateLeaves = [
+      hash([1n, 0n]),
+      hash([2n, 0n]),
+      0n,
+      0n,
+      0n,
+      0n,
+      0n,
+      0n
+    ];
+
+    const candidateTree =
+      buildMerkleTree(
+        candidateLeaves
+      );
+
+    const candidateIndex =
+      candidate === 1n
+        ? 0
+        : 1;
+
+    const candidatePath =
+      getMerklePath(
+        candidateTree,
+        candidateIndex
+      );
+
+    const scopeRoot =
+      hash([
+        eligibilityRoot,
+        candidateRoot
+      ]);
+
+    const input = {
+      credential:
+        credentialValue.toString(),
+
+      electionId:
+        electionId.toString(),
+
+      candidateChoice:
+        candidate.toString(),
+
+      voteSalt:
+        salt.toString(),
+
+      eligibilityPathElements:
+        eligibilityPath.pathElements.map(
+          x => x.toString()
+        ),
+
+      eligibilityPathIndices:
+        eligibilityPath.pathIndices.map(
+          x => x.toString()
+        ),
+
+      eligibilityRoot:
+        eligibilityRoot.toString(),
+
+      candidatePathElements:
+        candidatePath.pathElements.map(
+          x => x.toString()
+        ),
+
+      candidatePathIndices:
+        candidatePath.pathIndices.map(
+          x => x.toString()
+        ),
+
+      candidateRoot:
+        candidateRoot.toString(),
+
+      scopeRoot:
+        scopeRoot.toString()
+    };
+
+    const result =
+      await snarkjs.groth16.fullProve(
+        input,
+        WASM,
+        ZKEY
+      );
+
+    return {
+      a: [
+        BigInt(result.proof.pi_a[0]),
+        BigInt(result.proof.pi_a[1])
+      ],
+
+      b: [
+        [
+          BigInt(result.proof.pi_b[0][1]),
+          BigInt(result.proof.pi_b[0][0])
+        ],
+        [
+          BigInt(result.proof.pi_b[1][1]),
+          BigInt(result.proof.pi_b[1][0])
+        ]
+      ],
+
+      c: [
+        BigInt(result.proof.pi_c[0]),
+        BigInt(result.proof.pi_c[1])
+      ],
+
+      publicSignals:
+        result.publicSignals.map(
+          x => BigInt(x)
+        )
+    };
+  }
+
+  it(
+    "allows a normal wallet to create a vote",
+    async function () {
+      const latest =
+        await ethers.provider.getBlock(
+          "latest"
         );
 
-      if (index < 0) {
-        throw new Error(
-          "Candidate not registered"
+      const start =
+        BigInt(
+          latest.timestamp + 30
         );
-      }
 
-      const siblings = [];
-      const indices = [];
+      const end =
+        BigInt(
+          latest.timestamp + 150
+        );
 
-      let position = index;
-
-      for (
-        let depth = 0;
-        depth < 3;
-        depth += 1
-      ) {
-        siblings.push(
-          levels[depth][
-            position ^ 1
+      await voting
+        .connect(voter)
+        .createVote(
+          "Student Council",
+          "Choose a representative",
+          start,
+          end,
+          [
+            {
+              id: 1n,
+              candidateAddress:
+                alice.address,
+              name: "Candidate A"
+            },
+            {
+              id: 2n,
+              candidateAddress:
+                bob.address,
+              name: "Candidate B"
+            }
           ]
         );
 
-        indices.push(
-          position % 2
-        );
-
-        position =
-          Math.floor(position / 2);
-      }
-
-      return {
-        siblings,
-        indices
-      };
+      expect(
+        await voting.nextElectionId()
+      ).to.equal(3n);
     }
-  };
-}
-
-async function makeBallot({
-  credential,
-  electionId,
-  candidateChoice,
-  voteSalt,
-  leaves,
-  participantIndex = 0,
-  candidateIds
-}) {
-  const eligibility =
-    eligibilityMerkleTree(
-      leaves
-    );
-
-  const eligibilityPath =
-    eligibility.pathFor(
-      participantIndex
-    );
-
-  const candidates =
-    candidateMerkleTree(
-      candidateIds
-    );
-
-  const candidatePath =
-    candidates.pathFor(
-      candidateChoice
-    );
-
-  const scopeRoot =
-    hash([
-      eligibility.root,
-      candidates.root
-    ]);
-
-  /*
-   * IMPORTANT:
-   *
-   * These are the EXACT signal names
-   * used by the working VoteValidity circuit.
-   */
-  const input = {
-    credential:
-      credential.toString(),
-
-    electionId:
-      electionId.toString(),
-
-    candidateChoice:
-      candidateChoice.toString(),
-
-    voteSalt:
-      voteSalt.toString(),
-
-    eligibilityRoot:
-      eligibility.root.toString(),
-
-    eligibilityPathElements:
-      eligibilityPath.siblings.map(
-        (x) => x.toString()
-      ),
-
-    eligibilityPathIndices:
-      eligibilityPath.indices.map(
-        (x) => x.toString()
-      ),
-
-    candidateRoot:
-      candidates.root.toString(),
-
-    candidatePathElements:
-      candidatePath.siblings.map(
-        (x) => x.toString()
-      ),
-
-    candidatePathIndices:
-      candidatePath.indices.map(
-        (x) => x.toString()
-      ),
-
-    scopeRoot:
-      scopeRoot.toString()
-  };
-
-  console.log(
-    "\nGenerating ZK proof..."
   );
 
-  const {
-    proof,
-    publicSignals
-  } =
-    await snarkjs.groth16.fullProve(
-      input,
-      WASM,
-      ZKEY
-    );
+  it(
+    "allows the creator to register eligible participants before voting",
+    async function () {
+      const newCredential = 777777n;
 
-  console.log(
-    "✅ ZK proof generated"
-  );
-
-  const calldata =
-    await snarkjs.groth16.exportSolidityCallData(
-      proof,
-      publicSignals
-    );
-
-  const [
-    a,
-    b,
-    c,
-    signals
-  ] =
-    JSON.parse(
-      `[${calldata}]`
-    );
-
-  return {
-    a,
-    b,
-    c,
-    signals,
-
-    eligibilityRoot:
-      eligibility.root,
-
-    candidateRoot:
-      candidates.root,
-
-    scopeRoot,
-
-    voteCommitment:
-      hash([
-        candidateChoice,
-        voteSalt
-      ]),
-
-    nullifierHash:
-      hash([
-        credential,
-        electionId
-      ])
-  };
-}
-
-describe(
-  "ZKVoting end-to-end",
-  function () {
-
-    let voting;
-
-    let gov1;
-    let gov2;
-
-    let voter;
-
-    before(async function () {
-      poseidon =
-        await circomlib.buildPoseidon();
-
-      F =
-        poseidon.F;
-    });
-
-    async function deploy() {
-      [
-        gov1,
-        gov2,
-        voter
-      ] =
-        await ethers.getSigners();
-
-      // ----------------------------------------------------------
-      // Poseidon library
-      // ----------------------------------------------------------
-
-      const poseidonFactory =
-        await ethers.getContractFactory(
-          "PoseidonT3"
-        );
-
-      const poseidonLibrary =
-        await poseidonFactory.deploy();
-
-      await poseidonLibrary.waitForDeployment();
-
-      // ----------------------------------------------------------
-      // Groth16 verifier
-      // ----------------------------------------------------------
-
-      const verifierFactory =
-        await ethers.getContractFactory(
-          "Groth16Verifier"
-        );
-
-      const verifier =
-        await verifierFactory.deploy();
-
-      await verifier.waitForDeployment();
-
-      // ----------------------------------------------------------
-      // ZKVoting
-      // ----------------------------------------------------------
-
-      const votingFactory =
-        await ethers.getContractFactory(
-          "ZKVoting",
-          {
-            libraries: {
-              PoseidonT3:
-                await poseidonLibrary.getAddress()
-            }
-          }
-        );
-
-      voting =
-        await votingFactory.deploy(
-          await verifier.getAddress(),
-          [
-            gov1.address,
-            gov2.address
-          ],
-          2
-        );
-
-      await voting.waitForDeployment();
-    }
-
-    it(
-      "completes a full election lifecycle",
-      async function () {
-
-        // ========================================================
-        // 1. DEPLOY
-        // ========================================================
-
-        await deploy();
-
-        // ========================================================
-        // 2. BASIC DATA
-        // ========================================================
-
-        const credential =
-          123456789n;
-
-        const candidateIds = [
-          1n,
-          2n
-        ];
-
-        // ========================================================
-        // 3. CREATE ELECTION
-        // ========================================================
-
-        const block =
-          await ethers.provider.getBlock(
-            "latest"
-          );
-
-        const now =
-          Number(block.timestamp);
-
-        const startTime =
-          now + 10;
-
-        const endTime =
-          now + 120;
-
-        await voting.proposeElection(
-          "Ethiopia National Election",
-          0,
-          startTime,
-          endTime,
-          candidateIds
-        );
-
-        const nextId =
-          await voting.nextElectionId();
-
-        const electionId =
-          nextId - 1n;
-
-        console.log(
-          `\nElection ID: ${electionId}`
-        );
-
-        // ========================================================
-        // 4. REGISTER PARTICIPANT
-        // ========================================================
-
-        const credentialLeaf =
-          hash([
-            credential
-          ]);
-
-        const nullifierHash =
-          hash([
-            credential,
-            electionId
-          ]);
-
-        await voting.registerParticipant(
+      await voting
+        .connect(creator)
+        .registerParticipant(
           electionId,
-          voter.address,
-          credentialLeaf,
-          nullifierHash
-        );
-
-        expect(
-          await voting.getParticipantCount(
+          attacker.address,
+          hash([newCredential]),
+          hash([
+            newCredential,
             electionId
-          )
-        ).to.equal(1);
-
-        console.log(
-          "✅ Participant registered"
+          ])
         );
 
-        // ========================================================
-        // 5. GET ACTUAL ON-CHAIN LEAVES
-        // ========================================================
+      expect(
+        await voting.registeredParticipant(
+          electionId,
+          attacker.address
+        )
+      ).to.equal(true);
+    }
+  );
 
-        const onChainLeaves =
-          await voting.getEligibilityLeaves(
-            electionId
-          );
+  it(
+    "prevents participant registration after voting starts",
+    async function () {
+      await activateVote();
 
-        const leaves =
-          onChainLeaves.map(
-            (x) => BigInt(x)
-          );
-
-        // ========================================================
-        // 6. VERIFY LOCAL ELIGIBILITY ROOT
-        // ========================================================
-
-        const eligibility =
-          eligibilityMerkleTree(
-            leaves
-          );
-
-        const electionBeforeApproval =
-          await voting.elections(
-            electionId
-          );
-
-        expect(
-          BigInt(
-            electionBeforeApproval
-              .eligibilityRoot
-          )
-        ).to.equal(
-          eligibility.root
-        );
-
-        // ========================================================
-        // 7. GOVERNANCE APPROVAL
-        // ========================================================
-
-        await voting
-          .connect(gov1)
-          .approveElection(
-            electionId
-          );
-
-        await voting
-          .connect(gov2)
-          .approveElection(
-            electionId
-          );
-
-        const approved =
-          await voting.elections(
-            electionId
-          );
-
-        expect(
-          approved.proposalApproved
-        ).to.equal(true);
-
-        console.log(
-          "✅ Election approved"
-        );
-
-        // ========================================================
-        // 8. WAIT FOR START
-        // ========================================================
-
-        await ethers.provider.send(
-          "evm_increaseTime",
-          [11]
-        );
-
-        await ethers.provider.send(
-          "evm_mine"
-        );
-
-        // ========================================================
-        // 9. ACTIVATE
-        // ========================================================
-
-        await voting.activateElection(
-          electionId
-        );
-
-        const active =
-          await voting.elections(
-            electionId
-          );
-
-        expect(
-          active.votingStarted
-        ).to.equal(true);
-
-        console.log(
-          "✅ Election activated"
-        );
-
-        // ========================================================
-        // 10. BUILD VALID ZK BALLOT
-        // ========================================================
-
-        const candidateChoice =
-          1n;
-
-        const voteSalt =
-          987654321n;
-
-        const ballot =
-          await makeBallot({
-            credential,
+      await expect(
+        voting
+          .connect(creator)
+          .registerParticipant(
             electionId,
-            candidateChoice,
-            voteSalt,
-            leaves,
-            participantIndex: 0,
-            candidateIds
-          });
-
-        // ========================================================
-        // 11. VERIFY ROOTS MATCH CONTRACT
-        // ========================================================
-
-        const electionForRoots =
-          await voting.elections(
-            electionId
-          );
-
-        expect(
-          ballot.eligibilityRoot
-        ).to.equal(
-          BigInt(
-            electionForRoots
-              .eligibilityRoot
+            attacker.address,
+            hash([777777n]),
+            hash([
+              777777n,
+              electionId
+            ])
           )
+      ).to.be.revertedWith(
+        "Voting already started"
+      );
+    }
+  );
+
+  it(
+    "accepts a valid ZK vote from a registered participant",
+    async function () {
+      await activateVote();
+
+      const proof =
+        await generateProof();
+
+      await voting
+        .connect(voter)
+        .castPrivateVote(
+          electionId,
+          proof.a,
+          proof.b,
+          proof.c,
+          proof.publicSignals
+        );
+    }
+  );
+
+  it(
+    "rejects the same nullifier twice",
+    async function () {
+      await activateVote();
+
+      const proof =
+        await generateProof();
+
+      await voting
+        .connect(voter)
+        .castPrivateVote(
+          electionId,
+          proof.a,
+          proof.b,
+          proof.c,
+          proof.publicSignals
         );
 
-        expect(
-          ballot.candidateRoot
-        ).to.equal(
-          BigInt(
-            electionForRoots
-              .candidateRoot
-          )
-        );
-
-        // ========================================================
-        // 12. CAST PRIVATE VOTE
-        // ========================================================
-
-        console.log(
-          "Casting private vote..."
-        );
-
-        await voting
+      await expect(
+        voting
           .connect(voter)
           .castPrivateVote(
             electionId,
-            ballot.a,
-            ballot.b,
-            ballot.c,
-            ballot.signals
-          );
+            proof.a,
+            proof.b,
+            proof.c,
+            proof.publicSignals
+          )
+      ).to.be.revertedWith(
+        "Nullifier already used"
+      );
+    }
+  );
 
-        const afterVote =
-          await voting.elections(
-            electionId
-          );
+  it(
+    "rejects an unregistered wallet with a valid proof",
+    async function () {
+      await activateVote();
 
-        expect(
-          afterVote.acceptedBallots
-        ).to.equal(1);
+      const proof =
+        await generateProof();
 
-        console.log(
-          "✅ Private vote accepted"
-        );
-
-        // ========================================================
-        // 13. WAIT UNTIL ELECTION ENDS
-        // ========================================================
-
-        await ethers.provider.send(
-          "evm_increaseTime",
-          [120]
-        );
-
-        await ethers.provider.send(
-          "evm_mine"
-        );
-
-        // ========================================================
-        // 14. END ELECTION
-        // ========================================================
-
-        await voting.endElection(
-          electionId
-        );
-
-        const ended =
-          await voting.elections(
-            electionId
-          );
-
-        expect(
-          ended.ended
-        ).to.equal(true);
-
-        console.log(
-          "✅ Election ended"
-        );
-
-        // ========================================================
-        // 15. REVEAL
-        // ========================================================
-
-        await voting.revealVote(
-          electionId,
-          candidateChoice,
-          voteSalt
-        );
-
-        const revealed =
-          await voting.elections(
-            electionId
-          );
-
-        expect(
-          revealed.revealedBallots
-        ).to.equal(1);
-
-        const voteCount =
-          await voting.getVoteCount(
+      await expect(
+        voting
+          .connect(attacker)
+          .castPrivateVote(
             electionId,
-            candidateChoice
-          );
+            proof.a,
+            proof.b,
+            proof.c,
+            proof.publicSignals
+          )
+      ).to.be.revertedWith(
+        "Not registered"
+      );
+    }
+  );
 
-        expect(
-          voteCount
-        ).to.equal(1);
+  it(
+    "rejects a malformed proof",
+    async function () {
+      await activateVote();
 
-        console.log(
-          "✅ Vote revealed and counted"
-        );
+      const proof =
+        await generateProof();
 
-        // ========================================================
-        // 16. WAIT FOR REVEAL DEADLINE
-        // ========================================================
+      proof.a[0] =
+        proof.a[0] + 1n;
 
-        await ethers.provider.send(
-          "evm_increaseTime",
-          [
-            7 * 24 * 60 * 60
-          ]
-        );
+      await expect(
+        voting
+          .connect(voter)
+          .castPrivateVote(
+            electionId,
+            proof.a,
+            proof.b,
+            proof.c,
+            proof.publicSignals
+          )
+      ).to.be.reverted;
+    }
+  );
 
-        await ethers.provider.send(
-          "evm_mine"
-        );
+  it(
+    "rejects an invalid candidate during reveal",
+    async function () {
+      await activateVote();
 
-        // ========================================================
-        // 17. FINALIZE
-        // ========================================================
-
-        await voting.finalizeElection(
+      const times =
+        await voting.getVoteTimes(
           electionId
         );
 
-        const finalized =
-          await voting.elections(
+      await ethers.provider.send(
+        "evm_setNextBlockTimestamp",
+        [
+          Number(times[1])
+        ]
+      );
+
+      await ethers.provider.send(
+        "evm_mine"
+      );
+
+      await voting
+        .connect(attacker)
+        .endVote(
+          electionId
+        );
+
+      await expect(
+        voting
+          .connect(attacker)
+          .revealVote(
+            electionId,
+            999n,
+            voteSalt
+          )
+      ).to.be.revertedWith(
+        "Invalid candidate"
+      );
+    }
+  );
+
+  it(
+    "allows a non-creator to end the vote",
+    async function () {
+      await activateVote();
+
+      const times =
+        await voting.getVoteTimes(
+          electionId
+        );
+
+      await ethers.provider.send(
+        "evm_setNextBlockTimestamp",
+        [
+          Number(times[1])
+        ]
+      );
+
+      await ethers.provider.send(
+        "evm_mine"
+      );
+
+      await voting
+        .connect(attacker)
+        .endVote(
+          electionId
+        );
+    }
+  );
+
+  it(
+    "rejects finalization while the reveal period is active",
+    async function () {
+      await activateVote();
+
+      const times =
+        await voting.getVoteTimes(
+          electionId
+        );
+
+      await ethers.provider.send(
+        "evm_setNextBlockTimestamp",
+        [
+          Number(times[1])
+        ]
+      );
+
+      await ethers.provider.send(
+        "evm_mine"
+      );
+
+      await voting
+        .connect(attacker)
+        .endVote(
+          electionId
+        );
+
+      await expect(
+        voting
+          .connect(attacker)
+          .finalizeVote(
             electionId
-          );
-
-        expect(
-          finalized.finalized
-        ).to.equal(true);
-
-        console.log(
-          "\n=========================================="
-        );
-
-        console.log(
-          "✅ COMPLETE ELECTION LIFECYCLE PASSED"
-        );
-
-        console.log(
-          "==========================================\n"
-        );
-      }
-    );
-  }
-);
+          )
+      ).to.be.revertedWith(
+        "Reveal period active"
+      );
+    }
+  );
+});

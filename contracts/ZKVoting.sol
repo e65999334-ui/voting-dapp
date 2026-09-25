@@ -7,23 +7,22 @@ import "./PoseidonT3.sol";
 /**
  * EthiopiaChain ZK Voting
  *
- * Research / educational prototype.
+ * General-purpose decentralized voting protocol.
  *
- * Protocol:
- * - Election creation is restricted to the election authority.
- * - Participants are registered before governance approval.
- * - Participant credentials remain private; only their Poseidon leaf is stored.
- * - The contract maintains a fixed 8-leaf eligibility Merkle tree.
- * - Governance approval uses N-of-M authorization.
- * - Participants submit Groth16 proofs without revealing their credential
- *   or candidate choice in the proof public signals.
- * - An election-bound nullifier prevents double voting.
- * - Candidate membership is fixed when the election is proposed.
- * - Commitments are revealed after the election and then tallied.
+ * IMPORTANT DESIGN:
+ * - Any wallet can create a vote.
+ * - The vote creator manages participant registration before voting starts.
+ * - Governance does NOT approve ordinary votes.
+ * - Governance remains available for protocol-level governance.
+ * - Vote configuration becomes locked once voting starts.
+ * - Voting is enforced by the smart contract.
+ * - ZK proofs verify eligibility and vote validity.
+ * - Nullifiers prevent double voting.
+ * - Vote commitments prevent changing a submitted ballot.
+ * - Ending and finalization are permissionless once their conditions are met.
  *
- * This remains a research prototype. Direct MetaMask transactions expose
- * the transaction sender, and the commit/reveal mechanism does not provide
- * full transaction-level voter anonymity.
+ * This contract is intended for testing/development and should receive
+ * independent security review before production use.
  */
 contract ZKVoting {
     uint256 public constant PUBLIC_SIGNAL_COUNT = 4;
@@ -32,77 +31,223 @@ contract ZKVoting {
 
     uint64 public constant REVEAL_PERIOD = 1 days;
 
-    // ---------------------------------------------------------------------
-    // Governance
-    // ---------------------------------------------------------------------
-
-    mapping(address => bool) public isGovernanceMember;
-    address[] public governanceMembers;
-    uint256 public approvalThreshold;
-
-    mapping(uint256 => mapping(address => bool))
-        public electionApprovalByMember;
-
-    mapping(uint256 => uint256)
-        public electionApprovalCount;
-
-    enum GovernanceChangeType {
-        AddMember,
-        RemoveMember
-    }
-
-    struct GovernanceChange {
-        address member;
-        GovernanceChangeType changeType;
-        bool executed;
-        uint256 approvalCount;
-    }
-
-    uint256 public nextGovernanceChangeId = 1;
-
-    mapping(uint256 => GovernanceChange)
-        public governanceChanges;
-
-    mapping(uint256 => mapping(address => bool))
-        public governanceChangeApprovalByMember;
-
-    // ---------------------------------------------------------------------
-    // Election authority
-    // ---------------------------------------------------------------------
-
-    /**
-     * The first configured governance member is the initial election
-     * authority. This keeps the deployment simple while still preventing
-     * arbitrary accounts from creating elections.
-     */
-    address public electionAuthority;
-
-    // ---------------------------------------------------------------------
-    // ZK verifier
-    // ---------------------------------------------------------------------
+    uint256 public constant MAX_PARTICIPANTS = TREE_LEAVES;
 
     IVerifier public immutable verifier;
 
     uint256 public nextElectionId = 1;
 
-    // ---------------------------------------------------------------------
-    // Election
-    // ---------------------------------------------------------------------
+    // =============================================================
+    // PROTOCOL GOVERNANCE
+    // =============================================================
+
+    /*
+     * Governance is now protocol-level governance.
+     *
+     * It does NOT control individual classroom, community,
+     * company, club, or ordinary user-created votes.
+     */
+    uint256 public immutable governanceThreshold;
+
+    mapping(address => bool) public isGovernanceMember;
+
+    address[] public governanceMembers;
+
+    struct GovernanceAction {
+        uint256 approvalCount;
+        bool executed;
+        mapping(address => bool) approvedBy;
+    }
+
+    mapping(bytes32 => GovernanceAction)
+        private governanceActions;
+
+    event GovernanceMemberAdded(
+        address indexed member
+    );
+
+    event GovernanceApproval(
+        bytes32 indexed actionId,
+        address indexed member,
+        uint256 approvalCount
+    );
+
+    event GovernanceActionExecuted(
+        bytes32 indexed actionId
+    );
+
+    modifier onlyGovernance() {
+        require(
+            isGovernanceMember[msg.sender],
+            "Not governance member"
+        );
+        _;
+    }
+
+    constructor(
+        address verifier_,
+        address[] memory governanceMembers_,
+        uint256 governanceThreshold_
+    ) {
+        require(
+            verifier_ != address(0),
+            "Zero verifier"
+        );
+
+        require(
+            governanceMembers_.length > 0,
+            "No governance members"
+        );
+
+        require(
+            governanceThreshold_ > 0 &&
+            governanceThreshold_ <=
+            governanceMembers_.length,
+            "Invalid governance threshold"
+        );
+
+        verifier =
+            IVerifier(verifier_);
+
+        governanceThreshold =
+            governanceThreshold_;
+
+        for (
+            uint256 i = 0;
+            i < governanceMembers_.length;
+            i++
+        ) {
+            address member =
+                governanceMembers_[i];
+
+            require(
+                member != address(0),
+                "Zero governance member"
+            );
+
+            require(
+                !isGovernanceMember[member],
+                "Duplicate governance member"
+            );
+
+            isGovernanceMember[member] =
+                true;
+
+            governanceMembers.push(
+                member
+            );
+
+            emit GovernanceMemberAdded(
+                member
+            );
+        }
+    }
+
+    function getGovernanceMembers()
+        external
+        view
+        returns (address[] memory)
+    {
+        return governanceMembers;
+    }
+
+    function getGovernanceApproval(
+        bytes32 actionId,
+        address member
+    )
+        external
+        view
+        returns (bool)
+    {
+        return
+            governanceActions[actionId]
+                .approvedBy[member];
+    }
+
+    function getGovernanceApprovalCount(
+        bytes32 actionId
+    )
+        external
+        view
+        returns (uint256)
+    {
+        return
+            governanceActions[actionId]
+                .approvalCount;
+    }
+
+    function _approveGovernanceAction(
+        bytes32 actionId
+    )
+        internal
+        onlyGovernance
+        returns (bool executed)
+    {
+        GovernanceAction storage action =
+            governanceActions[actionId];
+
+        require(
+            !action.executed,
+            "Action already executed"
+        );
+
+        require(
+            !action.approvedBy[msg.sender],
+            "Already approved"
+        );
+
+        action.approvedBy[msg.sender] =
+            true;
+
+        action.approvalCount++;
+
+        emit GovernanceApproval(
+            actionId,
+            msg.sender,
+            action.approvalCount
+        );
+
+        if (
+            action.approvalCount >=
+            governanceThreshold
+        ) {
+            action.executed = true;
+
+            emit GovernanceActionExecuted(
+                actionId
+            );
+
+            return true;
+        }
+
+        return false;
+    }
+
+    // =============================================================
+    // ELECTION
+    // =============================================================
 
     struct Election {
         string title;
+        string description;
 
-        // Automatically maintained from registered participant leaves.
+        address creator;
+
         uint256 eligibilityRoot;
-
-        // Computed from the fixed candidate set.
         uint256 candidateRoot;
 
         uint64 startTime;
         uint64 endTime;
         uint64 revealDeadline;
 
+        /*
+         * proposalApproved is retained for ABI/UI compatibility.
+         *
+         * Permissionless votes are automatically approved when
+         * created because governance no longer approves each vote.
+         */
         bool proposalApproved;
+
         bool votingStarted;
         bool ended;
         bool finalized;
@@ -111,13 +256,24 @@ contract ZKVoting {
         uint256 revealedBallots;
     }
 
-    mapping(uint256 => Election) public elections;
+    mapping(uint256 => Election)
+        private elections;
 
-    // ---------------------------------------------------------------------
-    // Participants / eligibility tree
-    // ---------------------------------------------------------------------
+    struct Candidate {
+        uint256 id;
+        address candidateAddress;
+        string name;
+    }
 
-    uint256 public constant MAX_PARTICIPANTS = TREE_LEAVES;
+    mapping(uint256 => Candidate[])
+        private electionCandidates;
+
+    mapping(uint256 => mapping(uint256 => bool))
+        public candidateAllowed;
+
+    // =============================================================
+    // ELIGIBILITY
+    // =============================================================
 
     struct Participant {
         address wallet;
@@ -126,7 +282,8 @@ contract ZKVoting {
         bool registered;
     }
 
-    mapping(uint256 => Participant[]) private participants;
+    mapping(uint256 => Participant[])
+        private participants;
 
     mapping(uint256 => mapping(address => bool))
         public registeredParticipant;
@@ -140,7 +297,6 @@ contract ZKVoting {
     mapping(uint256 => mapping(address => uint256))
         public participantIndex;
 
-    // electionId => tree index => Poseidon(credential)
     mapping(uint256 => mapping(uint256 => uint256))
         private eligibilityLeaves;
 
@@ -150,12 +306,12 @@ contract ZKVoting {
     mapping(uint256 => mapping(uint256 => bool))
         private eligibilityNullifierUsed;
 
-    // ---------------------------------------------------------------------
-    // Voting
-    // ---------------------------------------------------------------------
-
     mapping(uint256 => mapping(uint256 => bool))
         public nullifierUsed;
+
+    // =============================================================
+    // VOTE STORAGE
+    // =============================================================
 
     mapping(uint256 => mapping(uint256 => bool))
         public voteCommitmentUsed;
@@ -166,20 +322,22 @@ contract ZKVoting {
     mapping(uint256 => mapping(uint256 => uint256))
         private voteCounts;
 
-    mapping(uint256 => mapping(uint256 => bool))
-        public candidateAllowed;
+    // =============================================================
+    // EVENTS
+    // =============================================================
 
-    mapping(uint256 => uint256[]) private electionCandidates;
-
-    // ---------------------------------------------------------------------
-    // Events
-    // ---------------------------------------------------------------------
-
-    event ElectionProposed(
+    event VoteCreated(
         uint256 indexed electionId,
+        address indexed creator,
         string title,
-        uint256 eligibilityRoot,
-        uint256 candidateRoot
+        string description
+    );
+
+    event CandidateAdded(
+        uint256 indexed electionId,
+        uint256 indexed candidateId,
+        address indexed candidateAddress,
+        string name
     );
 
     event ParticipantRegistered(
@@ -191,15 +349,13 @@ contract ZKVoting {
         uint256 eligibilityRoot
     );
 
-    event ElectionApprovalSubmitted(
-        uint256 indexed electionId,
-        address indexed member,
-        uint256 approvalCount
+    event VoteApproved(
+        uint256 indexed electionId
     );
 
-    event ElectionApproved(uint256 indexed electionId);
-
-    event ElectionActivated(uint256 indexed electionId);
+    event VoteActivated(
+        uint256 indexed electionId
+    );
 
     event VoteAccepted(
         uint256 indexed electionId,
@@ -213,135 +369,69 @@ contract ZKVoting {
         uint256 candidateId
     );
 
-    event ElectionEnded(uint256 indexed electionId);
+    event VoteEnded(
+        uint256 indexed electionId
+    );
 
-    event ElectionFinalized(
+    event VoteFinalized(
         uint256 indexed electionId,
         uint256 revealedBallots,
         uint256 acceptedBallots
     );
 
-    event GovernanceChangeProposed(
-        uint256 indexed changeId,
-        address indexed member,
-        GovernanceChangeType changeType
-    );
+    // =============================================================
+    // MODIFIERS
+    // =============================================================
 
-    event GovernanceChangeApprovalSubmitted(
-        uint256 indexed changeId,
-        address indexed member,
-        uint256 approvalCount
-    );
-
-    event GovernanceChangeExecuted(
-        uint256 indexed changeId,
-        address indexed member,
-        GovernanceChangeType changeType
-    );
-
-    event ElectionAuthorityChanged(
-        address indexed previousAuthority,
-        address indexed newAuthority
-    );
-
-    // ---------------------------------------------------------------------
-    // Modifiers
-    // ---------------------------------------------------------------------
-
-    modifier onlyGovernanceMember() {
-        require(
-            isGovernanceMember[msg.sender],
-            "Not governance member"
-        );
-        _;
-    }
-
-    modifier onlyElectionAuthority() {
-        require(
-            msg.sender == electionAuthority,
-            "Not election authority"
-        );
-        _;
-    }
-
-    modifier electionExists(uint256 electionId) {
-        require(
-            bytes(elections[electionId].title).length > 0,
-            "Unknown election"
-        );
-        _;
-    }
-
-    // ---------------------------------------------------------------------
-    // Constructor
-    // ---------------------------------------------------------------------
-
-    constructor(
-        address verifier_,
-        address[] memory members_,
-        uint256 threshold_
+    modifier voteExists(
+        uint256 electionId
     ) {
         require(
-            verifier_ != address(0),
-            "Zero verifier"
+            bytes(
+                elections[electionId].title
+            ).length > 0,
+            "Unknown vote"
         );
 
-        require(
-            members_.length > 0,
-            "No governance members"
-        );
-
-        require(
-            threshold_ > 0 &&
-                threshold_ <= members_.length,
-            "Invalid threshold"
-        );
-
-        verifier = IVerifier(verifier_);
-
-        approvalThreshold = threshold_;
-
-        for (uint256 i = 0; i < members_.length; i++) {
-            address member = members_[i];
-
-            require(
-                member != address(0),
-                "Zero member"
-            );
-
-            require(
-                !isGovernanceMember[member],
-                "Duplicate member"
-            );
-
-            isGovernanceMember[member] = true;
-            governanceMembers.push(member);
-        }
-
-        // First governance member is the initial authority.
-        electionAuthority = members_[0];
+        _;
     }
 
-    // ---------------------------------------------------------------------
-    // Election creation
-    // ---------------------------------------------------------------------
+    modifier onlyVoteCreator(
+        uint256 electionId
+    ) {
+        require(
+            elections[electionId].creator ==
+                msg.sender,
+            "Not vote creator"
+        );
+
+        _;
+    }
+
+    // =============================================================
+    // CREATE VOTE
+    // =============================================================
 
     /**
-     * Creates an election with an initially empty eligibility tree.
+     * Anyone can create a vote.
      *
-     * Participants are inserted afterward by the authority.
-     * The eligibility root is automatically recalculated after each
-     * participant registration.
+     * Examples:
+     * - Teacher creates classroom vote
+     * - Club member creates club vote
+     * - Company organizer creates internal vote
+     * - Community organizer creates community vote
+     * - Authorized organization creates official election
+     *
+     * Governance is NOT required.
      */
-    function proposeElection(
+    function createVote(
         string calldata title,
-        uint256 eligibilityRoot,
+        string calldata description,
         uint64 startTime,
         uint64 endTime,
-        uint256[] calldata candidateIds
+        Candidate[] calldata candidates
     )
         external
-        onlyElectionAuthority
         returns (uint256 electionId)
     {
         require(
@@ -349,14 +439,6 @@ contract ZKVoting {
             "Empty title"
         );
 
-        /*
-         * A zero root is intentionally allowed during creation.
-         * It will be replaced automatically when participants are
-         * registered.
-         *
-         * A non-zero root is also accepted for compatibility with
-         * the existing backend tests and tooling.
-         */
         require(
             startTime < endTime,
             "Invalid time range"
@@ -364,94 +446,338 @@ contract ZKVoting {
 
         require(
             endTime > block.timestamp,
-            "Election already ended"
+            "Vote already ended"
         );
 
         require(
             endTime <=
-                type(uint64).max - REVEAL_PERIOD,
-            "Election too late"
+                type(uint64).max -
+                REVEAL_PERIOD,
+            "Vote too late"
         );
 
         require(
-            candidateIds.length > 0 &&
-                candidateIds.length <= TREE_LEAVES,
+            candidates.length > 0 &&
+            candidates.length <= TREE_LEAVES,
             "Invalid candidate count"
         );
 
-        uint256[] memory candidates =
-            new uint256[](candidateIds.length);
-
-        for (uint256 i = 0; i < candidateIds.length; i++) {
-            require(
-                candidateIds[i] != 0,
-                "Zero candidate"
+        uint256[] memory ids =
+            new uint256[](
+                candidates.length
             );
 
-            candidates[i] = candidateIds[i];
-        }
-
-        _sort(candidates);
-
-        for (uint256 i = 1; i < candidates.length; i++) {
+        for (
+            uint256 i = 0;
+            i < candidates.length;
+            i++
+        ) {
             require(
-                candidates[i] != candidates[i - 1],
-                "Duplicate candidate"
+                candidates[i].id != 0,
+                "Zero candidate ID"
             );
+
+            require(
+                candidates[i].candidateAddress !=
+                    address(0),
+                "Zero candidate address"
+            );
+
+            require(
+                bytes(
+                    candidates[i].name
+                ).length > 0,
+                "Empty candidate name"
+            );
+
+            ids[i] =
+                candidates[i].id;
+
+            for (
+                uint256 j = 0;
+                j < i;
+                j++
+            ) {
+                require(
+                    candidates[i].id !=
+                        candidates[j].id,
+                    "Duplicate candidate ID"
+                );
+
+                require(
+                    candidates[i].candidateAddress !=
+                        candidates[j].candidateAddress,
+                    "Duplicate candidate address"
+                );
+            }
         }
+
+        _sort(ids);
 
         uint256 candidateRoot =
-            _candidateRoot(candidates);
+            _candidateRoot(ids);
 
         require(
             candidateRoot != 0,
             "Zero candidate root"
         );
 
-        electionId = nextElectionId++;
+        electionId =
+            nextElectionId++;
 
-        Election storage election =
+        Election storage e =
             elections[electionId];
 
-        election.title = title;
-        election.eligibilityRoot = eligibilityRoot;
-        election.candidateRoot = candidateRoot;
-        election.startTime = startTime;
-        election.endTime = endTime;
-        election.revealDeadline =
-            endTime + REVEAL_PERIOD;
+        e.title =
+            title;
 
-        for (uint256 i = 0; i < candidates.length; i++) {
+        e.description =
+            description;
+
+        e.creator =
+            msg.sender;
+
+        e.candidateRoot =
+            candidateRoot;
+
+        e.startTime =
+            startTime;
+
+        e.endTime =
+            endTime;
+
+        e.revealDeadline =
+            endTime +
+            REVEAL_PERIOD;
+
+        /*
+         * Every valid user-created vote is automatically approved.
+         *
+         * This is the critical difference from the old architecture.
+         */
+        e.proposalApproved =
+            true;
+
+        for (
+            uint256 i = 0;
+            i < candidates.length;
+            i++
+        ) {
             candidateAllowed[
                 electionId
-            ][candidates[i]] = true;
+            ][
+                candidates[i].id
+            ] = true;
 
             electionCandidates[
                 electionId
-            ].push(candidates[i]);
+            ].push(
+                candidates[i]
+            );
+
+            emit CandidateAdded(
+                electionId,
+                candidates[i].id,
+                candidates[i].candidateAddress,
+                candidates[i].name
+            );
         }
 
-        emit ElectionProposed(
+        emit VoteCreated(
             electionId,
+            msg.sender,
             title,
-            eligibilityRoot,
-            candidateRoot
+            description
+        );
+
+        emit VoteApproved(
+            electionId
         );
     }
 
-    // ---------------------------------------------------------------------
-    // Participant registration
-    // ---------------------------------------------------------------------
+    // =============================================================
+    // ELECTION READ FUNCTIONS
+    // =============================================================
+
+    function getVoteTitle(
+        uint256 electionId
+    )
+        external
+        view
+        voteExists(electionId)
+        returns (string memory)
+    {
+        return elections[electionId].title;
+    }
+
+    function getVoteDescription(
+        uint256 electionId
+    )
+        external
+        view
+        voteExists(electionId)
+        returns (string memory)
+    {
+        return
+            elections[electionId]
+                .description;
+    }
+
+    function getVoteCreator(
+        uint256 electionId
+    )
+        external
+        view
+        voteExists(electionId)
+        returns (address)
+    {
+        return
+            elections[electionId]
+                .creator;
+    }
+
+    function getVoteRoots(
+        uint256 electionId
+    )
+        external
+        view
+        voteExists(electionId)
+        returns (
+            uint256 eligibilityRoot,
+            uint256 candidateRoot
+        )
+    {
+        Election storage e =
+            elections[electionId];
+
+        return (
+            e.eligibilityRoot,
+            e.candidateRoot
+        );
+    }
+
+    function getVoteTimes(
+        uint256 electionId
+    )
+        external
+        view
+        voteExists(electionId)
+        returns (
+            uint64 startTime,
+            uint64 endTime,
+            uint64 revealDeadline
+        )
+    {
+        Election storage e =
+            elections[electionId];
+
+        return (
+            e.startTime,
+            e.endTime,
+            e.revealDeadline
+        );
+    }
+
+    function getVoteStatus(
+        uint256 electionId
+    )
+        external
+        view
+        voteExists(electionId)
+        returns (
+            bool proposalApproved,
+            bool votingStarted,
+            bool ended,
+            bool finalized
+        )
+    {
+        Election storage e =
+            elections[electionId];
+
+        return (
+            e.proposalApproved,
+            e.votingStarted,
+            e.ended,
+            e.finalized
+        );
+    }
+
+    function getVoteBallots(
+        uint256 electionId
+    )
+        external
+        view
+        voteExists(electionId)
+        returns (
+            uint256 acceptedBallots,
+            uint256 revealedBallots
+        )
+    {
+        Election storage e =
+            elections[electionId];
+
+        return (
+            e.acceptedBallots,
+            e.revealedBallots
+        );
+    }
+
+    function getElectionCandidates(
+        uint256 electionId
+    )
+        external
+        view
+        voteExists(electionId)
+        returns (
+            uint256[] memory ids,
+            address[] memory addresses,
+            string[] memory names
+        )
+    {
+        Candidate[] storage candidates =
+            electionCandidates[
+                electionId
+            ];
+
+        uint256 length =
+            candidates.length;
+
+        ids =
+            new uint256[](length);
+
+        addresses =
+            new address[](length);
+
+        names =
+            new string[](length);
+
+        for (
+            uint256 i = 0;
+            i < length;
+            i++
+        ) {
+            ids[i] =
+                candidates[i].id;
+
+            addresses[i] =
+                candidates[i]
+                    .candidateAddress;
+
+            names[i] =
+                candidates[i].name;
+        }
+    }
+
+    // =============================================================
+    // PARTICIPANT REGISTRATION
+    // =============================================================
 
     /**
-     * Registers a wallet and its private credential commitment.
+     * The creator of an individual vote manages its eligibility list.
      *
-     * credentialLeaf must equal Poseidon(credential).
+     * Governance is NOT required.
      *
-     * nullifierHash must equal:
-     * Poseidon(credential, electionId)
-     *
-     * The credential itself is never stored on-chain.
+     * Registration closes automatically once voting starts.
      */
     function registerParticipant(
         uint256 electionId,
@@ -460,35 +786,26 @@ contract ZKVoting {
         uint256 nullifierHash
     )
         external
-        onlyElectionAuthority
-        electionExists(electionId)
+        voteExists(electionId)
+        onlyVoteCreator(electionId)
     {
-        Election storage election =
+        Election storage e =
             elections[electionId];
 
         require(
-            !election.proposalApproved,
-            "Election already approved"
+            !e.votingStarted,
+            "Voting already started"
         );
 
         require(
-            !election.votingStarted,
-            "Election already active"
+            block.timestamp <
+                e.startTime,
+            "Registration closed"
         );
 
         require(
             participant != address(0),
             "Zero participant"
-        );
-
-        require(
-            credentialLeaf != 0,
-            "Zero credential leaf"
-        );
-
-        require(
-            nullifierHash != 0,
-            "Zero nullifier"
         );
 
         require(
@@ -499,27 +816,38 @@ contract ZKVoting {
         );
 
         require(
+            credentialLeaf != 0,
+            "Zero credential"
+        );
+
+        require(
+            nullifierHash != 0,
+            "Zero nullifier"
+        );
+
+        require(
             !eligibilityLeafUsed[
                 electionId
             ][credentialLeaf],
-            "Credential leaf already used"
+            "Credential already used"
         );
 
         require(
             !eligibilityNullifierUsed[
                 electionId
             ][nullifierHash],
-            "Nullifier already registered"
+            "Nullifier already used"
         );
 
         require(
             participants[electionId].length <
                 MAX_PARTICIPANTS,
-            "Participant limit reached"
+            "Maximum participants reached"
         );
 
-        uint256 index =
-            participants[electionId].length;
+        uint256 treeIndex =
+            participants[electionId]
+                .length;
 
         participants[electionId].push(
             Participant({
@@ -536,38 +864,51 @@ contract ZKVoting {
 
         participantCredentialLeaf[
             electionId
-        ][participant] = credentialLeaf;
+        ][participant] =
+            credentialLeaf;
 
         participantNullifierHash[
             electionId
-        ][participant] = nullifierHash;
+        ][participant] =
+            nullifierHash;
 
         participantIndex[
             electionId
-        ][participant] = index;
+        ][participant] =
+            treeIndex;
 
         eligibilityLeaves[
             electionId
-        ][index] = credentialLeaf;
+        ][treeIndex] =
+            credentialLeaf;
 
         eligibilityLeafUsed[
             electionId
-        ][credentialLeaf] = true;
+        ][credentialLeaf] =
+            true;
 
         eligibilityNullifierUsed[
             electionId
-        ][nullifierHash] = true;
+        ][nullifierHash] =
+            true;
 
-        election.eligibilityRoot =
-            _eligibilityRoot(electionId);
+        uint256 root =
+            _eligibilityRoot(
+                electionId
+            );
+
+        elections[
+            electionId
+        ].eligibilityRoot =
+            root;
 
         emit ParticipantRegistered(
             electionId,
             participant,
-            index,
+            treeIndex,
             credentialLeaf,
             nullifierHash,
-            election.eligibilityRoot
+            root
         );
     }
 
@@ -576,10 +917,12 @@ contract ZKVoting {
     )
         external
         view
-        electionExists(electionId)
+        voteExists(electionId)
         returns (uint256)
     {
-        return participants[electionId].length;
+        return
+            participants[electionId]
+                .length;
     }
 
     function getParticipant(
@@ -588,21 +931,18 @@ contract ZKVoting {
     )
         external
         view
-        electionExists(electionId)
+        voteExists(electionId)
         returns (
-            address participant,
+            address wallet,
             uint256 credentialLeaf,
             uint256 nullifierHash,
             bool registered
         )
     {
-        require(
-            index < participants[electionId].length,
-            "Invalid participant index"
-        );
-
-        Participant memory p =
-            participants[electionId][index];
+        Participant storage p =
+            participants[
+                electionId
+            ][index];
 
         return (
             p.wallet,
@@ -612,206 +952,223 @@ contract ZKVoting {
         );
     }
 
-    /**
-     * Returns all eight leaves used by the fixed depth-3
-     * eligibility tree. Unused leaves are zero.
-     */
     function getEligibilityLeaves(
         uint256 electionId
     )
         external
         view
-        electionExists(electionId)
-        returns (uint256[8] memory leaves)
+        voteExists(electionId)
+        returns (
+            uint256[] memory leaves
+        )
     {
-        for (uint256 i = 0; i < TREE_LEAVES; i++) {
-            leaves[i] =
-                eligibilityLeaves[electionId][i];
-        }
-    }
-
-    // ---------------------------------------------------------------------
-    // Election candidates
-    // ---------------------------------------------------------------------
-
-    function getElectionCandidates(
-        uint256 electionId
-    )
-        external
-        view
-        electionExists(electionId)
-        returns (uint256[] memory)
-    {
-        return electionCandidates[electionId];
-    }
-
-    // ---------------------------------------------------------------------
-    // Governance approval
-    // ---------------------------------------------------------------------
-
-    function approveElection(
-        uint256 electionId
-    )
-        external
-        onlyGovernanceMember
-        electionExists(electionId)
-    {
-        Election storage election =
-            elections[electionId];
-
-        require(
-            !election.proposalApproved,
-            "Already approved"
-        );
-
-        require(
-            election.eligibilityRoot != 0,
-            "No participants registered"
-        );
-
-        require(
-            !electionApprovalByMember[
-                electionId
-            ][msg.sender],
-            "Already approved by member"
-        );
-
-        electionApprovalByMember[
-            electionId
-        ][msg.sender] = true;
-
-        electionApprovalCount[
-            electionId
-        ] += 1;
-
-        emit ElectionApprovalSubmitted(
-            electionId,
-            msg.sender,
-            electionApprovalCount[electionId]
-        );
-
-        if (
-            electionApprovalCount[electionId] >=
-            approvalThreshold
-        ) {
-            election.proposalApproved = true;
-
-            emit ElectionApproved(
-                electionId
+        leaves =
+            new uint256[](
+                TREE_LEAVES
             );
+
+        for (
+            uint256 i = 0;
+            i < TREE_LEAVES;
+            i++
+        ) {
+            leaves[i] =
+                eligibilityLeaves[
+                    electionId
+                ][i];
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Election activation
-    // ---------------------------------------------------------------------
+    // =============================================================
+    // PERMISSIONLESS VOTE LIFECYCLE
+    // =============================================================
 
-    function activateElection(
+    /**
+     * Anyone can activate a vote once its start time arrives.
+     *
+     * This prevents the creator from having to be online just to
+     * start the election.
+     */
+    function activateVote(
         uint256 electionId
     )
         external
-        onlyElectionAuthority
-        electionExists(electionId)
+        voteExists(electionId)
     {
-        Election storage election =
+        Election storage e =
             elections[electionId];
 
         require(
-            election.proposalApproved,
-            "Not approved"
+            e.proposalApproved,
+            "Vote not approved"
+        );
+
+        require(
+            participants[electionId].length > 0,
+            "No participants"
+        );
+
+        require(
+            e.eligibilityRoot != 0,
+            "No eligibility root"
         );
 
         require(
             block.timestamp >=
-                election.startTime,
-            "Not started"
+                e.startTime,
+            "Vote not started"
         );
 
         require(
-            block.timestamp <
-                election.endTime,
-            "Already ended"
+            block.timestamp < e.endTime,
+            "Vote ended"
         );
 
         require(
-            !election.ended,
-            "Ended"
+            !e.ended,
+            "Vote already ended"
         );
 
         require(
-            !election.votingStarted,
-            "Already active"
+            !e.votingStarted,
+            "Vote already active"
         );
 
-        election.votingStarted = true;
+        e.votingStarted =
+            true;
 
-        emit ElectionActivated(
+        emit VoteActivated(
             electionId
         );
     }
 
-    // ---------------------------------------------------------------------
-    // ZK voting
-    // ---------------------------------------------------------------------
+    /**
+     * Anyone can end a vote after its end time.
+     *
+     * This removes another point of centralized control.
+     */
+    function endVote(
+        uint256 electionId
+    )
+        external
+        voteExists(electionId)
+    {
+        Election storage e =
+            elections[electionId];
+
+        require(
+            e.votingStarted,
+            "Vote not active"
+        );
+
+        require(
+            block.timestamp >=
+                e.endTime,
+            "Vote still active"
+        );
+
+        require(
+            !e.ended,
+            "Vote already ended"
+        );
+
+        e.ended =
+            true;
+
+        emit VoteEnded(
+            electionId
+        );
+    }
 
     /**
-     * Public signal order:
-     *
-     * [0] nullifierHash
-     * [1] voteCommitment
-     * [2] electionId
-     * [3] scopeRoot
+     * Anyone can finalize the vote after the reveal period.
      */
+    function finalizeVote(
+        uint256 electionId
+    )
+        external
+        voteExists(electionId)
+    {
+        Election storage e =
+            elections[electionId];
+
+        require(
+            e.ended,
+            "Vote not ended"
+        );
+
+        require(
+            block.timestamp >=
+                e.revealDeadline,
+            "Reveal period active"
+        );
+
+        require(
+            !e.finalized,
+            "Already finalized"
+        );
+
+        e.finalized =
+            true;
+
+        emit VoteFinalized(
+            electionId,
+            e.revealedBallots,
+            e.acceptedBallots
+        );
+    }
+
+    // =============================================================
+    // PRIVATE ZK VOTING
+    // =============================================================
+
     function castPrivateVote(
         uint256 electionId,
         uint256[2] calldata a,
         uint256[2][2] calldata b,
         uint256[2] calldata c,
-        uint256[4] calldata publicSignals
+        uint256[PUBLIC_SIGNAL_COUNT]
+            calldata publicSignals
     )
         external
-        electionExists(electionId)
+        voteExists(electionId)
     {
-        Election storage election =
+        Election storage e =
             elections[electionId];
 
         require(
-            election.proposalApproved,
-            "Not approved"
+            e.proposalApproved,
+            "Vote not approved"
         );
 
         require(
-            election.votingStarted,
-            "Not active"
+            e.votingStarted,
+            "Vote not active"
         );
 
         require(
             block.timestamp >=
-                election.startTime,
-            "Not started"
+                e.startTime,
+            "Vote not started"
         );
 
         require(
-            block.timestamp <
-                election.endTime,
-            "Voting closed"
+            block.timestamp < e.endTime,
+            "Vote ended"
         );
 
-        require(
-            !election.ended,
-            "Ended"
-        );
-
-        require(
-            !election.finalized,
-            "Finalized"
-        );
-
+        /*
+         * Current ZK circuit still uses wallet-linked registration.
+         *
+         * This will be the next privacy upgrade:
+         * remove the public wallet/credential association while
+         * retaining ZK eligibility and nullifier enforcement.
+         */
         require(
             registeredParticipant[
                 electionId
             ][msg.sender],
-            "Not registered participant"
+            "Not registered"
         );
 
         uint256 nullifierHash =
@@ -823,21 +1180,21 @@ contract ZKVoting {
         require(
             publicSignals[2] ==
                 electionId,
-            "Wrong election signal"
+            "Invalid election ID"
         );
 
         uint256 expectedScopeRoot =
             PoseidonT3.hash(
                 [
-                    election.eligibilityRoot,
-                    election.candidateRoot
+                    e.eligibilityRoot,
+                    e.candidateRoot
                 ]
             );
 
         require(
             publicSignals[3] ==
                 expectedScopeRoot,
-            "Wrong scope root"
+            "Invalid scope root"
         );
 
         require(
@@ -855,21 +1212,21 @@ contract ZKVoting {
                 electionId
             ][msg.sender] ==
                 nullifierHash,
-            "Wrong participant credential"
+            "Invalid nullifier"
         );
 
         require(
             !nullifierUsed[
                 electionId
             ][nullifierHash],
-            "Already voted"
+            "Nullifier already used"
         );
 
         require(
             !voteCommitmentUsed[
                 electionId
             ][voteCommitment],
-            "Duplicate commitment"
+            "Commitment already used"
         );
 
         require(
@@ -879,18 +1236,20 @@ contract ZKVoting {
                 c,
                 publicSignals
             ),
-            "Invalid ZK proof"
+            "Invalid proof"
         );
 
         nullifierUsed[
             electionId
-        ][nullifierHash] = true;
+        ][nullifierHash] =
+            true;
 
         voteCommitmentUsed[
             electionId
-        ][voteCommitment] = true;
+        ][voteCommitment] =
+            true;
 
-        election.acceptedBallots += 1;
+        e.acceptedBallots++;
 
         emit VoteAccepted(
             electionId,
@@ -899,73 +1258,42 @@ contract ZKVoting {
         );
     }
 
-    // ---------------------------------------------------------------------
-    // End election
-    // ---------------------------------------------------------------------
+    // =============================================================
+    // REVEAL
+    // =============================================================
 
-    function endElection(
-        uint256 electionId
-    )
-        external
-        onlyElectionAuthority
-        electionExists(electionId)
-    {
-        Election storage election =
-            elections[electionId];
-
-        require(
-            election.proposalApproved,
-            "Not approved"
-        );
-
-        require(
-            block.timestamp >=
-                election.endTime,
-            "Election not finished"
-        );
-
-        require(
-            !election.ended,
-            "Already ended"
-        );
-
-        election.ended = true;
-
-        emit ElectionEnded(
-            electionId
-        );
-    }
-
-    // ---------------------------------------------------------------------
-    // Reveal
-    // ---------------------------------------------------------------------
-
+    /**
+     * Anyone may reveal a valid commitment.
+     *
+     * The commitment itself is only counted once.
+     */
     function revealVote(
         uint256 electionId,
         uint256 candidateId,
         uint256 voteSalt
     )
         external
-        electionExists(electionId)
+        voteExists(electionId)
     {
-        Election storage election =
+        Election storage e =
             elections[electionId];
 
         require(
-            election.ended,
-            "Election not ended"
+            e.ended,
+            "Vote not ended"
         );
 
         require(
-            !election.finalized,
-            "Finalized"
+            block.timestamp <=
+                e.revealDeadline,
+            "Reveal period ended"
         );
 
         require(
             candidateAllowed[
                 electionId
             ][candidateId],
-            "Candidate not registered"
+            "Invalid candidate"
         );
 
         uint256 commitment =
@@ -992,13 +1320,14 @@ contract ZKVoting {
 
         voteCommitmentRevealed[
             electionId
-        ][commitment] = true;
+        ][commitment] =
+            true;
 
-        election.revealedBallots += 1;
+        e.revealedBallots++;
 
         voteCounts[
             electionId
-        ][candidateId] += 1;
+        ][candidateId]++;
 
         emit VoteRevealed(
             electionId,
@@ -1007,259 +1336,25 @@ contract ZKVoting {
         );
     }
 
-    // ---------------------------------------------------------------------
-    // Finalization
-    // ---------------------------------------------------------------------
-
-    function finalizeElection(
-        uint256 electionId
-    )
-        external
-        onlyElectionAuthority
-        electionExists(electionId)
-    {
-        Election storage election =
-            elections[electionId];
-
-        require(
-            election.ended,
-            "Election not ended"
-        );
-
-        require(
-            block.timestamp >=
-                election.revealDeadline,
-            "Reveal period active"
-        );
-
-        require(
-            !election.finalized,
-            "Already finalized"
-        );
-
-        election.finalized = true;
-
-        emit ElectionFinalized(
-            electionId,
-            election.revealedBallots,
-            election.acceptedBallots
-        );
-    }
-
-    // ---------------------------------------------------------------------
-    // Results
-    // ---------------------------------------------------------------------
-
     function getVoteCount(
         uint256 electionId,
         uint256 candidateId
     )
         external
         view
+        voteExists(electionId)
         returns (uint256)
     {
-        return voteCounts[
-            electionId
-        ][candidateId];
+        return
+            voteCounts[
+                electionId
+            ][candidateId];
     }
 
-    // ---------------------------------------------------------------------
-    // Governance membership management
-    // ---------------------------------------------------------------------
+    // =============================================================
+    // MERKLE ROOTS
+    // =============================================================
 
-    function proposeGovernanceMemberChange(
-        address member,
-        bool addMember
-    )
-        external
-        onlyGovernanceMember
-        returns (uint256 changeId)
-    {
-        require(
-            member != address(0),
-            "Zero member"
-        );
-
-        if (addMember) {
-            require(
-                !isGovernanceMember[member],
-                "Already governance member"
-            );
-        } else {
-            require(
-                isGovernanceMember[member],
-                "Not governance member"
-            );
-
-            require(
-                governanceMembers.length >
-                    approvalThreshold,
-                "Cannot remove below threshold"
-            );
-        }
-
-        changeId =
-            nextGovernanceChangeId++;
-
-        governanceChanges[changeId] =
-            GovernanceChange({
-                member: member,
-                changeType:
-                    addMember
-                        ? GovernanceChangeType.AddMember
-                        : GovernanceChangeType.RemoveMember,
-                executed: false,
-                approvalCount: 0
-            });
-
-        emit GovernanceChangeProposed(
-            changeId,
-            member,
-            governanceChanges[changeId]
-                .changeType
-        );
-    }
-
-    function approveGovernanceMemberChange(
-        uint256 changeId
-    )
-        external
-        onlyGovernanceMember
-    {
-        GovernanceChange storage change =
-            governanceChanges[changeId];
-
-        require(
-            change.member != address(0),
-            "Unknown governance change"
-        );
-
-        require(
-            !change.executed,
-            "Already executed"
-        );
-
-        require(
-            !governanceChangeApprovalByMember[
-                changeId
-            ][msg.sender],
-            "Already approved by member"
-        );
-
-        if (
-            change.changeType ==
-            GovernanceChangeType.AddMember
-        ) {
-            require(
-                !isGovernanceMember[
-                    change.member
-                ],
-                "Already governance member"
-            );
-        } else {
-            require(
-                isGovernanceMember[
-                    change.member
-                ],
-                "Not governance member"
-            );
-        }
-
-        governanceChangeApprovalByMember[
-            changeId
-        ][msg.sender] = true;
-
-        change.approvalCount += 1;
-
-        emit GovernanceChangeApprovalSubmitted(
-            changeId,
-            msg.sender,
-            change.approvalCount
-        );
-
-        if (
-            change.approvalCount >=
-            approvalThreshold
-        ) {
-            _executeGovernanceChange(
-                changeId,
-                change
-            );
-        }
-    }
-
-    function _executeGovernanceChange(
-        uint256 changeId,
-        GovernanceChange storage change
-    )
-        internal
-    {
-        change.executed = true;
-
-        if (
-            change.changeType ==
-            GovernanceChangeType.AddMember
-        ) {
-            isGovernanceMember[
-                change.member
-            ] = true;
-
-            governanceMembers.push(
-                change.member
-            );
-        } else {
-            require(
-                governanceMembers.length >
-                    approvalThreshold,
-                "Cannot remove below threshold"
-            );
-
-            isGovernanceMember[
-                change.member
-            ] = false;
-
-            for (
-                uint256 i = 0;
-                i < governanceMembers.length;
-                i++
-            ) {
-                if (
-                    governanceMembers[i] ==
-                    change.member
-                ) {
-                    governanceMembers[i] =
-                        governanceMembers[
-                            governanceMembers.length - 1
-                        ];
-
-                    governanceMembers.pop();
-
-                    break;
-                }
-            }
-        }
-
-        emit GovernanceChangeExecuted(
-            changeId,
-            change.member,
-            change.changeType
-        );
-    }
-
-    // ---------------------------------------------------------------------
-    // Internal Merkle tree logic
-    // ---------------------------------------------------------------------
-
-    /**
-     * Fixed depth-3 eligibility tree:
-     *
-     * 8 leaves
-     * 4 parents
-     * 2 parents
-     * 1 root
-     *
-     * Unused leaves are zero.
-     */
     function _eligibilityRoot(
         uint256 electionId
     )
@@ -1267,99 +1362,138 @@ contract ZKVoting {
         view
         returns (uint256)
     {
-        uint256[8] memory nodes;
+        uint256[8] memory level0;
 
         for (
             uint256 i = 0;
             i < TREE_LEAVES;
             i++
         ) {
-            nodes[i] =
+            level0[i] =
                 eligibilityLeaves[
                     electionId
                 ][i];
         }
 
-        for (
-            uint256 level = 0;
-            level < 3;
-            level++
-        ) {
-            uint256 count =
-                TREE_LEAVES >> level;
-
-            for (
-                uint256 i = 0;
-                i < count;
-                i += 2
-            ) {
-                nodes[i / 2] =
-                    PoseidonT3.hash(
-                        [
-                            nodes[i],
-                            nodes[i + 1]
-                        ]
-                    );
-            }
-        }
-
-        return nodes[0];
-    }
-
-    /**
-     * Candidate tree uses:
-     * leaf = Poseidon(candidateId, 0)
-     *
-     * and the same fixed 8-leaf depth-3 structure.
-     */
-    function _candidateRoot(
-        uint256[] memory candidates
-    )
-        internal
-        view
-        returns (uint256)
-    {
-        uint256[8] memory nodes;
+        uint256[4] memory level1;
 
         for (
             uint256 i = 0;
-            i < candidates.length;
+            i < 4;
             i++
         ) {
-            nodes[i] =
+            level1[i] =
                 PoseidonT3.hash(
                     [
-                        candidates[i],
-                        uint256(0)
+                        level0[i * 2],
+                        level0[i * 2 + 1]
                     ]
                 );
         }
 
-        for (
-            uint256 level = 0;
-            level < 3;
-            level++
-        ) {
-            uint256 count =
-                TREE_LEAVES >> level;
+        uint256[2] memory level2;
 
-            for (
-                uint256 i = 0;
-                i < count;
-                i += 2
+        level2[0] =
+            PoseidonT3.hash(
+                [
+                    level1[0],
+                    level1[1]
+                ]
+            );
+
+        level2[1] =
+            PoseidonT3.hash(
+                [
+                    level1[2],
+                    level1[3]
+                ]
+            );
+
+        return
+            PoseidonT3.hash(
+                [
+                    level2[0],
+                    level2[1]
+                ]
+            );
+    }
+
+    function _candidateRoot(
+        uint256[] memory sortedIds
+    )
+        internal
+        pure
+        returns (uint256)
+    {
+        uint256[8] memory level0;
+
+        for (
+            uint256 i = 0;
+            i < TREE_LEAVES;
+            i++
+        ) {
+            if (
+                i < sortedIds.length
             ) {
-                nodes[i / 2] =
+                level0[i] =
                     PoseidonT3.hash(
                         [
-                            nodes[i],
-                            nodes[i + 1]
+                            sortedIds[i],
+                            0
                         ]
                     );
+            } else {
+                level0[i] =
+                    0;
             }
         }
 
-        return nodes[0];
+        uint256[4] memory level1;
+
+        for (
+            uint256 i = 0;
+            i < 4;
+            i++
+        ) {
+            level1[i] =
+                PoseidonT3.hash(
+                    [
+                        level0[i * 2],
+                        level0[i * 2 + 1]
+                    ]
+                );
+        }
+
+        uint256[2] memory level2;
+
+        level2[0] =
+            PoseidonT3.hash(
+                [
+                    level1[0],
+                    level1[1]
+                ]
+            );
+
+        level2[1] =
+            PoseidonT3.hash(
+                [
+                    level1[2],
+                    level1[3]
+                ]
+            );
+
+        return
+            PoseidonT3.hash(
+                [
+                    level2[0],
+                    level2[1]
+                ]
+            );
     }
+
+    // =============================================================
+    // SORT
+    // =============================================================
 
     function _sort(
         uint256[] memory values
@@ -1372,8 +1506,11 @@ contract ZKVoting {
             i < values.length;
             i++
         ) {
-            uint256 key = values[i];
-            uint256 j = i;
+            uint256 key =
+                values[i];
+
+            uint256 j =
+                i;
 
             while (
                 j > 0 &&
@@ -1385,7 +1522,8 @@ contract ZKVoting {
                 j--;
             }
 
-            values[j] = key;
+            values[j] =
+                key;
         }
     }
 }

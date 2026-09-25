@@ -25,6 +25,7 @@
   "dependencies": {
     "circomlib": "2.0.5",
     "circomlibjs": "0.1.7",
+    "dotenv": "^18.0.4",
     "ethers": "^6.17.0",
     "poseidon-solidity": "^0.0.5",
     "react": "^19.3.0",
