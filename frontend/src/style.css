@@ -1,13 +1,5 @@
 :root {
-  font-family:
-    Inter,
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    "Segoe UI",
-    sans-serif;
-
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #eaf2ff;
   background: #07101c;
   font-synthesis: none;
@@ -32,7 +24,10 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background: #07101c;
+  background:
+    radial-gradient(circle at top left, rgba(30, 94, 160, 0.18), transparent 35%),
+    radial-gradient(circle at top right, rgba(0, 180, 190, 0.08), transparent 30%),
+    #07101c;
 }
 
 button,
@@ -48,6 +43,7 @@ button {
 
 button:disabled {
   cursor: not-allowed;
+  opacity: 0.55;
 }
 
 input,
@@ -58,4 +54,550 @@ select {
 
 #root {
   min-height: 100vh;
+}
+
+/* =========================================================
+   APP LAYOUT
+   ========================================================= */
+
+.app {
+  min-height: 100vh;
+  width: 100%;
+  padding: 32px 20px 60px;
+}
+
+.app-container {
+  width: min(1200px, 100%);
+  margin: 0 auto;
+}
+
+/* =========================================================
+   HEADER
+   ========================================================= */
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 28px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.brand-logo {
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  background: #102a46;
+  border: 1px solid #1d456b;
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.brand-text h1 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.brand-text p {
+  margin: 5px 0 0;
+  color: #8fa8c2;
+  font-size: 13px;
+}
+
+.wallet-button {
+  border: 1px solid #28577f;
+  background: #102a46;
+  color: #eaf2ff;
+  padding: 11px 16px;
+  border-radius: 10px;
+  font-weight: 700;
+  transition: 0.2s ease;
+}
+
+.wallet-button:hover {
+  background: #163a5d;
+  border-color: #3b78a9;
+}
+
+/* =========================================================
+   NAVIGATION
+   ========================================================= */
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px;
+  margin-bottom: 24px;
+  border: 1px solid #16334f;
+  border-radius: 14px;
+  background: #0a1929;
+}
+
+.tab {
+  flex: 1;
+  min-width: 130px;
+  border: 0;
+  border-radius: 9px;
+  padding: 11px 14px;
+  background: transparent;
+  color: #8fa8c2;
+  font-weight: 700;
+  transition: 0.2s ease;
+}
+
+.tab:hover {
+  color: #eaf2ff;
+  background: #10263c;
+}
+
+.tab.active {
+  color: #ffffff;
+  background: #18588a;
+}
+
+/* =========================================================
+   CARDS
+   ========================================================= */
+
+.card {
+  width: 100%;
+  padding: 24px;
+  margin-bottom: 20px;
+  border: 1px solid #173650;
+  border-radius: 16px;
+  background: rgba(10, 25, 41, 0.92);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.2);
+}
+
+.card h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+
+.card h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.card-description {
+  margin: 0 0 20px;
+  color: #8fa8c2;
+  line-height: 1.6;
+}
+
+/* =========================================================
+   GRID
+   ========================================================= */
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+/* =========================================================
+   FORMS
+   ========================================================= */
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-bottom: 16px;
+}
+
+.form-group label {
+  color: #b9cce0;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+  border: 1px solid #24445f;
+  border-radius: 9px;
+  padding: 11px 13px;
+  color: #eaf2ff;
+  background: #071522;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #607991;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: #3b87bd;
+  box-shadow: 0 0 0 3px rgba(59, 135, 189, 0.12);
+}
+
+textarea {
+  min-height: 110px;
+  resize: vertical;
+}
+
+/* =========================================================
+   BUTTONS
+   ========================================================= */
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.btn {
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 11px 17px;
+  font-weight: 750;
+  transition: 0.2s ease;
+}
+
+.btn-primary {
+  background: #1674a8;
+  color: #ffffff;
+  border-color: #2185ba;
+}
+
+.btn-primary:hover {
+  background: #1b87bf;
+}
+
+.btn-secondary {
+  background: #102a40;
+  color: #dcecff;
+  border-color: #28516e;
+}
+
+.btn-secondary:hover {
+  background: #153852;
+}
+
+.btn-danger {
+  background: #4b1f29;
+  color: #ffdce2;
+  border-color: #71313e;
+}
+
+.btn-danger:hover {
+  background: #602531;
+}
+
+.btn-success {
+  background: #164436;
+  color: #d9fff0;
+  border-color: #246b53;
+}
+
+.btn-success:hover {
+  background: #1b5745;
+}
+
+/* =========================================================
+   ELECTION INFO
+   ========================================================= */
+
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.info-box {
+  padding: 15px;
+  border: 1px solid #193b56;
+  border-radius: 11px;
+  background: #091b2b;
+}
+
+.info-label {
+  margin-bottom: 6px;
+  color: #718ba5;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.info-value {
+  color: #eaf2ff;
+  font-size: 14px;
+  font-weight: 700;
+  word-break: break-word;
+}
+
+/* =========================================================
+   CANDIDATES
+   ========================================================= */
+
+.candidate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.candidate-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 15px;
+  padding: 14px 16px;
+  border: 1px solid #1a3c57;
+  border-radius: 10px;
+  background: #091a29;
+}
+
+.candidate-info {
+  min-width: 0;
+}
+
+.candidate-name {
+  margin: 0 0 4px;
+  font-weight: 750;
+}
+
+.candidate-id {
+  color: #7590aa;
+  font-size: 12px;
+}
+
+.candidate-address {
+  color: #8fa8c2;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+/* =========================================================
+   STATUS / ALERTS
+   ========================================================= */
+
+.status {
+  padding: 13px 15px;
+  margin-bottom: 18px;
+  border-radius: 10px;
+  border: 1px solid #21445e;
+  background: #0b2032;
+  color: #b9d5ec;
+  line-height: 1.5;
+}
+
+.status.success {
+  border-color: #24634e;
+  background: #0c2920;
+  color: #bcefdc;
+}
+
+.status.error {
+  border-color: #6c303a;
+  background: #30171d;
+  color: #ffd0d7;
+}
+
+.status.warning {
+  border-color: #67521e;
+  background: #2b2410;
+  color: #f5dfa0;
+}
+
+/* =========================================================
+   CREDENTIAL / SECRET DISPLAY
+   ========================================================= */
+
+.secret-box {
+  padding: 18px;
+  margin: 18px 0;
+  border: 1px solid #2c5c7b;
+  border-radius: 12px;
+  background: #071a2b;
+}
+
+.secret-box h3 {
+  margin-bottom: 8px;
+}
+
+.secret-value {
+  display: block;
+  padding: 13px;
+  margin: 12px 0;
+  border: 1px dashed #376887;
+  border-radius: 8px;
+  background: #06131f;
+  color: #8fd5ff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.secret-warning {
+  color: #e8c979;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* =========================================================
+   LOADING
+   ========================================================= */
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 180px;
+  color: #8fa8c2;
+}
+
+.spinner {
+  width: 20px;
+  height: 20px;
+  margin-right: 10px;
+  border: 2px solid #29465f;
+  border-top-color: #49a5dc;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* =========================================================
+   TABLES
+   ========================================================= */
+
+.table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 12px 10px;
+  text-align: left;
+  border-bottom: 1px solid #19364e;
+}
+
+th {
+  color: #8da9c2;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+td {
+  color: #dcecff;
+  font-size: 13px;
+}
+
+/* =========================================================
+   MONOSPACE / HASHES
+   ========================================================= */
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* =========================================================
+   EMPTY STATES
+   ========================================================= */
+
+.empty {
+  padding: 35px 20px;
+  text-align: center;
+  color: #718ba5;
+  border: 1px dashed #24435d;
+  border-radius: 12px;
+  background: #091a29;
+}
+
+/* =========================================================
+   MOBILE
+   ========================================================= */
+
+@media (max-width: 850px) {
+  .grid,
+  .grid-3,
+  .info-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .wallet-button {
+    width: 100%;
+  }
+}
+
+@media (max-width: 600px) {
+  .app {
+    padding: 18px 12px 40px;
+  }
+
+  .card {
+    padding: 17px;
+    border-radius: 13px;
+  }
+
+  .tabs {
+    flex-direction: column;
+  }
+
+  .tab {
+    width: 100%;
+  }
+
+  .button-row {
+    flex-direction: column;
+  }
+
+  .btn {
+    width: 100%;
+  }
+
+  .candidate-card {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .brand-text h1 {
+    font-size: 20px;
+  }
 }

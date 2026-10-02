@@ -18,6 +18,7 @@ const zkey = path.join(zkDir, `${circuitName}.zkey`);
 const vkey = path.join(zkDir, "verification_key.json");
 const verifier = path.join(root, "contracts", "Groth16Verifier.sol");
 const poseidon = path.join(root, "contracts", "PoseidonT3.sol");
+const frontendZkDir = path.join(root, "frontend", "public", "zk");
 
 function run(args) {
   execFileSync(
@@ -85,6 +86,12 @@ if (!fs.existsSync(poseidon)) {
     poseidon
   );
 }
+
+// Keep the browser prover's WASM and proving key synchronized with the exact
+// circuit/verifier artifacts used by Hardhat and the adversarial tests.
+fs.mkdirSync(frontendZkDir, { recursive: true });
+fs.copyFileSync(wasm, path.join(frontendZkDir, `${circuitName}.wasm`));
+fs.copyFileSync(zkey, path.join(frontendZkDir, `${circuitName}.zkey`));
 
 fs.writeFileSync(stampFile, `${circuitHash}\n`);
 console.log(`ZK artifacts ready: ${wasm}, ${zkey}, ${verifier}`);

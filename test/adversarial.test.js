@@ -129,7 +129,8 @@ async function deployVoting(signers) {
     await votingFactory.deploy(
       await verifier.getAddress(),
       governanceMembers,
-      governanceThreshold
+      governanceThreshold,
+      signers[0].address
     );
 
   await voting.waitForDeployment();
@@ -228,13 +229,14 @@ describe("ZKVoting adversarial audit", function () {
 
     const realCredentialLeaf =
       hash([
-        credential
+        credential,
+        electionId
       ]);
 
     const realNullifier =
       hash([
-        credential,
-        electionId
+        realCredentialLeaf,
+        1n
       ]);
 
     /*
@@ -246,7 +248,8 @@ describe("ZKVoting adversarial audit", function () {
         electionId,
         voter.address,
         realCredentialLeaf,
-        realNullifier
+        realNullifier,
+        ethers.id("voter-identity")
       );
 
     /*
@@ -455,24 +458,60 @@ describe("ZKVoting adversarial audit", function () {
   }
 
   it(
-    "rejects an unregistered wallet even with a valid ZK proof",
+    "accepts a valid eligibility proof submitted by a different wallet",
     async function () {
       const proof =
         await generateProof();
 
+      await voting
+        .connect(attacker)
+        .castPrivateVote(
+          electionId,
+          proof.a,
+          proof.b,
+          proof.c,
+          proof.publicSignals
+        );
+
+      const [acceptedBallots] = await voting.getVoteBallots(electionId);
+      expect(acceptedBallots).to.equal(1n);
+    }
+  );
+
+  it(
+    "accepts a valid proof from the registered wallet",
+    async function () {
+      const proof = await generateProof();
+
+      await voting
+        .connect(voter)
+        .castPrivateVote(
+          electionId,
+          proof.a,
+          proof.b,
+          proof.c,
+          proof.publicSignals
+        );
+
+      const [acceptedBallots] = await voting.getVoteBallots(electionId);
+      expect(acceptedBallots).to.equal(1n);
+    }
+  );
+
+  it(
+    "prevents the same private vote from being relayed twice by different wallets",
+    async function () {
+      const proof = await generateProof();
+
+      await voting
+        .connect(attacker)
+        .castPrivateVote(electionId, proof.a, proof.b, proof.c, proof.publicSignals);
+
       await expect(
         voting
-          .connect(attacker)
-          .castPrivateVote(
-            electionId,
-            proof.a,
-            proof.b,
-            proof.c,
-            proof.publicSignals
-          )
-      ).to.be.revertedWith(
-        "Not registered"
-      );
+          .connect(alice)
+          .castPrivateVote(electionId, proof.a, proof.b, proof.c, proof.publicSignals)
+      ).to.be.revertedWith("Nullifier already used");
     }
   );
 
@@ -499,7 +538,8 @@ describe("ZKVoting adversarial audit", function () {
           electionId,
           attacker.address,
           newLeaf,
-          newNullifier
+          newNullifier,
+          ethers.id("attacker-identity")
         );
 
       expect(
@@ -524,7 +564,8 @@ describe("ZKVoting adversarial audit", function () {
             hash([
               999n,
               electionId
-            ])
+            ]),
+            ethers.id("zero-address-identity")
           )
       ).to.be.revertedWith(
         "Zero participant"
@@ -545,7 +586,8 @@ describe("ZKVoting adversarial audit", function () {
             hash([
               999n,
               electionId
-            ])
+            ]),
+            ethers.id("duplicate-wallet-identity")
           )
       ).to.be.revertedWith(
         "Participant already registered"
@@ -566,7 +608,8 @@ describe("ZKVoting adversarial audit", function () {
             hash([
               555n,
               electionId
-            ])
+            ]),
+            ethers.id("zero-credential-identity")
           )
       ).to.be.revertedWith(
         "Zero credential"
@@ -584,7 +627,8 @@ describe("ZKVoting adversarial audit", function () {
             electionId,
             attacker.address,
             hash([555n]),
-            0n
+            0n,
+            ethers.id("zero-nullifier-identity")
           )
       ).to.be.revertedWith(
         "Zero nullifier"
@@ -593,22 +637,23 @@ describe("ZKVoting adversarial audit", function () {
   );
 
   it(
-    "rejects unauthorized participant registration",
+    "rejects a participant registering a different wallet",
     async function () {
       await expect(
         voting
           .connect(attacker)
           .registerParticipant(
             electionId,
-            attacker.address,
+            voter.address,
             hash([777n]),
             hash([
               777n,
               electionId
-            ])
+            ]),
+            ethers.id("unauthorized-identity")
           )
       ).to.be.revertedWith(
-        "Not vote creator"
+        "Not identity issuer"
       );
     }
   );

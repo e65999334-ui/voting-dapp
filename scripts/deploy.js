@@ -1,5 +1,32 @@
 const hre = require("hardhat");
+const fs = require("fs");
+const path = require("path");
 require("dotenv").config();
+
+const COMPROMISED_DEPLOYER_ADDRESSES = new Set([
+  "0xb6f578bfd1aca6f3b4b4c518fa95d9a28d82aa2b"
+]);
+
+function updateFrontendContractAddress(address) {
+  if (hre.network.name !== "sepolia") {
+    console.log(
+      `Skipping frontend/.env update for ${hre.network.name}; the frontend is configured for Sepolia.`
+    );
+    return;
+  }
+
+  const envPath = path.join(__dirname, "..", "frontend", ".env");
+  const existing = fs.existsSync(envPath)
+    ? fs.readFileSync(envPath, "utf8")
+    : "";
+  const otherSettings = existing
+    .replace(/^VITE_CONTRACT_ADDRESS=.*(?:\r?\n|$)/gm, "")
+    .trimEnd();
+  const updated = `${otherSettings ? `${otherSettings}\n` : ""}VITE_CONTRACT_ADDRESS=${address}\n`;
+
+  fs.writeFileSync(envPath, updated, "utf8");
+  console.log("✅ Updated frontend/.env with the new Sepolia ZKVoting address.");
+}
 
 async function main() {
   console.log("\n========================================");
@@ -14,6 +41,15 @@ async function main() {
     "Deployer:",
     deployer.address
   );
+
+  if (
+    hre.network.name === "sepolia" &&
+    COMPROMISED_DEPLOYER_ADDRESSES.has(deployer.address.toLowerCase())
+  ) {
+    throw new Error(
+      "Refusing Sepolia deployment from the previously exposed deployer wallet. Configure a fresh DEPLOYER_PRIVATE_KEY first."
+    );
+  }
 
   const balance =
     await hre.ethers.provider.getBalance(
@@ -118,6 +154,10 @@ async function main() {
     BigInt(
       process.env.GOVERNANCE_THRESHOLD || "2"
     );
+  const identityIssuer = process.env.IDENTITY_ISSUER_ADDRESS;
+  if (!identityIssuer || !hre.ethers.isAddress(identityIssuer) || identityIssuer === hre.ethers.ZeroAddress) {
+    throw new Error("IDENTITY_ISSUER_ADDRESS must be set to the trusted identity-signing wallet.");
+  }
 
   console.log(
     "Governance members:"
@@ -152,13 +192,16 @@ async function main() {
     await ZKVoting.deploy(
       verifierAddress,
       governanceMembers,
-      governanceThreshold
+      governanceThreshold,
+      identityIssuer
     );
 
   await voting.waitForDeployment();
 
   const votingAddress =
     await voting.getAddress();
+
+  updateFrontendContractAddress(votingAddress);
 
   console.log(
     "ZKVoting:",

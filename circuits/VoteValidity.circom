@@ -66,8 +66,9 @@ template VoteValidity() {
     signal output nullifierHash;
     signal output voteCommitment;
 
-    component identityHasher = Poseidon(1);
+    component identityHasher = Poseidon(2);
     identityHasher.inputs[0] <== credential;
+    identityHasher.inputs[1] <== electionId;
 
     component eligibilityMembership = Merkle3();
     eligibilityMembership.leaf <== identityHasher.out;
@@ -95,8 +96,8 @@ template VoteValidity() {
     scopeHasher.out === scopeRoot;
 
     component nullifierHasher = Poseidon(2);
-    nullifierHasher.inputs[0] <== credential;
-    nullifierHasher.inputs[1] <== electionId;
+    nullifierHasher.inputs[0] <== identityHasher.out;
+    nullifierHasher.inputs[1] <== 1;
     nullifierHash <== nullifierHasher.out;
 
     component commitmentHasher = Poseidon(2);

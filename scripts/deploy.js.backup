@@ -6,6 +6,7 @@ async function main() {
     ? process.env.GOVERNANCE_MEMBERS.split(",").map((address) => address.trim())
     : [deployer.address, ...localAccounts.slice(0, 2).map((signer) => signer.address)];
   const threshold = BigInt(process.env.GOVERNANCE_THRESHOLD || "2");
+  const identityIssuer = process.env.IDENTITY_ISSUER_ADDRESS || deployer.address;
 
   if (configuredMembers.length < Number(threshold)) {
     throw new Error("GOVERNANCE_MEMBERS must contain at least GOVERNANCE_THRESHOLD addresses");
@@ -27,7 +28,8 @@ async function main() {
   const voting = await votingFactory.deploy(
     await verifier.getAddress(),
     configuredMembers,
-    threshold
+    threshold,
+    identityIssuer
   );
   await voting.waitForDeployment();
 
@@ -36,6 +38,7 @@ async function main() {
     verifier: await verifier.getAddress(),
     poseidonLibrary: await poseidonLibrary.getAddress(),
     voting: await voting.getAddress(),
+    identityIssuer,
     governanceMembers: configuredMembers,
     approvalThreshold: threshold.toString()
   }, null, 2));

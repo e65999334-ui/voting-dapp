@@ -11,7 +11,7 @@ import "./PoseidonT3.sol";
  *
  * IMPORTANT DESIGN:
  * - Any wallet can create a vote.
- * - The vote creator manages participant registration before voting starts.
+ * - A trusted identity issuer attests participant registration before voting starts.
  * - Governance does NOT approve ordinary votes.
  * - Governance remains available for protocol-level governance.
  * - Vote configuration becomes locked once voting starts.
@@ -29,11 +29,24 @@ contract ZKVoting {
 
     uint256 private constant TREE_LEAVES = 8;
 
+    bytes32 private constant IDENTITY_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 private constant IDENTITY_ATTESTATION_TYPEHASH =
+        keccak256("IdentityAttestation(uint256 electionId,address participant,bytes32 identityHash)");
+    bytes32 private constant IDENTITY_NAME_HASH =
+        keccak256("EthiopiaChain ZKVoting");
+    bytes32 private constant IDENTITY_VERSION_HASH =
+        keccak256("1");
+    uint256 private constant SECP256K1_HALF_ORDER =
+        0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
+
     uint64 public constant REVEAL_PERIOD = 1 days;
 
     uint256 public constant MAX_PARTICIPANTS = TREE_LEAVES;
 
     IVerifier public immutable verifier;
+
+    address public immutable identityIssuer;
 
     uint256 public nextElectionId = 1;
 
@@ -84,14 +97,28 @@ contract ZKVoting {
         _;
     }
 
+    modifier onlyIdentityIssuer() {
+        require(
+            msg.sender == identityIssuer,
+            "Not identity issuer"
+        );
+        _;
+    }
+
     constructor(
         address verifier_,
         address[] memory governanceMembers_,
-        uint256 governanceThreshold_
+        uint256 governanceThreshold_,
+        address identityIssuer_
     ) {
         require(
             verifier_ != address(0),
             "Zero verifier"
+        );
+
+        require(
+            identityIssuer_ != address(0),
+            "Zero identity issuer"
         );
 
         require(
@@ -108,6 +135,8 @@ contract ZKVoting {
 
         verifier =
             IVerifier(verifier_);
+
+        identityIssuer = identityIssuer_;
 
         governanceThreshold =
             governanceThreshold_;
@@ -236,6 +265,8 @@ contract ZKVoting {
         uint256 eligibilityRoot;
         uint256 candidateRoot;
 
+        uint64 registrationStartTime;
+        uint64 registrationEndTime;
         uint64 startTime;
         uint64 endTime;
         uint64 revealDeadline;
@@ -256,8 +287,18 @@ contract ZKVoting {
         uint256 revealedBallots;
     }
 
+    struct VoteSchedule {
+        uint64 registrationStartTime;
+        uint64 registrationEndTime;
+        uint64 startTime;
+        uint64 endTime;
+    }
+
     mapping(uint256 => Election)
         private elections;
+
+    mapping(uint256 => bytes32)
+        private electionAccessCodeHashes;
 
     struct Candidate {
         uint256 id;
@@ -287,6 +328,10 @@ contract ZKVoting {
 
     mapping(uint256 => mapping(address => bool))
         public registeredParticipant;
+
+    // Stores only a per-election commitment, never the raw voter identifier.
+    mapping(uint256 => mapping(bytes32 => bool))
+        public identityRegistered;
 
     mapping(uint256 => mapping(address => uint256))
         private participantCredentialLeaf;
@@ -434,93 +479,136 @@ contract ZKVoting {
         external
         returns (uint256 electionId)
     {
+        uint64 registrationStart =
+            uint64(block.timestamp);
+
+        return _createVote(
+            title,
+            description,
+            VoteSchedule(
+                registrationStart,
+                startTime,
+                startTime,
+                endTime
+            ),
+            candidates
+        );
+    }
+
+    function createVoteWithRegistration(
+        string calldata title,
+        string calldata description,
+        uint64 registrationStartTime,
+        uint64 registrationEndTime,
+        uint64 startTime,
+        uint64 endTime,
+        Candidate[] calldata candidates
+    )
+        external
+        returns (uint256 electionId)
+    {
+        return _createVote(
+            title,
+            description,
+            VoteSchedule(
+                registrationStartTime,
+                registrationEndTime,
+                startTime,
+                endTime
+            ),
+            candidates
+        );
+    }
+
+    function createVoteWithRegistrationAndAccessCode(
+        string calldata title,
+        string calldata description,
+        uint64 registrationStartTime,
+        uint64 registrationEndTime,
+        uint64 startTime,
+        uint64 endTime,
+        bytes32 accessCodeHash,
+        Candidate[] calldata candidates
+    )
+        external
+        returns (uint256 electionId)
+    {
+        require(accessCodeHash != bytes32(0), "Zero access code hash");
+
+        electionId = _createVote(
+            title,
+            description,
+            VoteSchedule(
+                registrationStartTime,
+                registrationEndTime,
+                startTime,
+                endTime
+            ),
+            candidates
+        );
+
+        electionAccessCodeHashes[electionId] = accessCodeHash;
+    }
+
+    function getElectionAccessCodeHash(uint256 electionId)
+        external
+        view
+        voteExists(electionId)
+        returns (bytes32)
+    {
+        return electionAccessCodeHashes[electionId];
+    }
+
+    function _createVote(
+        string calldata title,
+        string calldata description,
+        VoteSchedule memory schedule,
+        Candidate[] calldata candidates
+    )
+        private
+        returns (uint256 electionId)
+    {
         require(
             bytes(title).length > 0,
             "Empty title"
         );
 
         require(
-            startTime < endTime,
+            schedule.registrationStartTime <
+                schedule.registrationEndTime,
+            "Invalid registration range"
+        );
+
+        require(
+            schedule.registrationEndTime <=
+                schedule.startTime,
+            "Registration after vote start"
+        );
+
+        require(
+            schedule.registrationEndTime > block.timestamp,
+            "Registration already ended"
+        );
+
+        require(
+            schedule.startTime < schedule.endTime,
             "Invalid time range"
         );
 
         require(
-            endTime > block.timestamp,
+            schedule.endTime > block.timestamp,
             "Vote already ended"
         );
 
         require(
-            endTime <=
+            schedule.endTime <=
                 type(uint64).max -
                 REVEAL_PERIOD,
             "Vote too late"
         );
 
-        require(
-            candidates.length > 0 &&
-            candidates.length <= TREE_LEAVES,
-            "Invalid candidate count"
-        );
-
-        uint256[] memory ids =
-            new uint256[](
-                candidates.length
-            );
-
-        for (
-            uint256 i = 0;
-            i < candidates.length;
-            i++
-        ) {
-            require(
-                candidates[i].id != 0,
-                "Zero candidate ID"
-            );
-
-            require(
-                candidates[i].candidateAddress !=
-                    address(0),
-                "Zero candidate address"
-            );
-
-            require(
-                bytes(
-                    candidates[i].name
-                ).length > 0,
-                "Empty candidate name"
-            );
-
-            ids[i] =
-                candidates[i].id;
-
-            for (
-                uint256 j = 0;
-                j < i;
-                j++
-            ) {
-                require(
-                    candidates[i].id !=
-                        candidates[j].id,
-                    "Duplicate candidate ID"
-                );
-
-                require(
-                    candidates[i].candidateAddress !=
-                        candidates[j].candidateAddress,
-                    "Duplicate candidate address"
-                );
-            }
-        }
-
-        _sort(ids);
-
         uint256 candidateRoot =
-            _candidateRoot(ids);
-
-        require(
-            candidateRoot != 0,
-            "Zero candidate root"
-        );
+            _buildCandidateRoot(candidates);
 
         electionId =
             nextElectionId++;
@@ -540,14 +628,20 @@ contract ZKVoting {
         e.candidateRoot =
             candidateRoot;
 
+        e.registrationStartTime =
+            schedule.registrationStartTime;
+
+        e.registrationEndTime =
+            schedule.registrationEndTime;
+
         e.startTime =
-            startTime;
+            schedule.startTime;
 
         e.endTime =
-            endTime;
+            schedule.endTime;
 
         e.revealDeadline =
-            endTime +
+            schedule.endTime +
             REVEAL_PERIOD;
 
         /*
@@ -558,22 +652,61 @@ contract ZKVoting {
         e.proposalApproved =
             true;
 
-        for (
-            uint256 i = 0;
-            i < candidates.length;
-            i++
-        ) {
-            candidateAllowed[
-                electionId
-            ][
-                candidates[i].id
-            ] = true;
+        _storeCandidates(electionId, candidates);
 
-            electionCandidates[
-                electionId
-            ].push(
-                candidates[i]
-            );
+        _emitVoteCreated(
+            electionId,
+            title,
+            description
+        );
+
+        emit VoteApproved(
+            electionId
+        );
+    }
+
+    function _buildCandidateRoot(
+        Candidate[] calldata candidates
+    )
+        private
+        pure
+        returns (uint256 candidateRoot)
+    {
+        require(
+            candidates.length > 0 &&
+            candidates.length <= TREE_LEAVES,
+            "Invalid candidate count"
+        );
+
+        uint256[] memory ids =
+            new uint256[](candidates.length);
+
+        for (uint256 i = 0; i < candidates.length; i++) {
+            require(candidates[i].id != 0, "Zero candidate ID");
+            require(candidates[i].candidateAddress != address(0), "Zero candidate address");
+            require(bytes(candidates[i].name).length > 0, "Empty candidate name");
+            ids[i] = candidates[i].id;
+
+            for (uint256 j = 0; j < i; j++) {
+                require(candidates[i].id != candidates[j].id, "Duplicate candidate ID");
+                require(candidates[i].candidateAddress != candidates[j].candidateAddress, "Duplicate candidate address");
+            }
+        }
+
+        _sort(ids);
+        candidateRoot = _candidateRoot(ids);
+        require(candidateRoot != 0, "Zero candidate root");
+    }
+
+    function _storeCandidates(
+        uint256 electionId,
+        Candidate[] calldata candidates
+    )
+        private
+    {
+        for (uint256 i = 0; i < candidates.length; i++) {
+            candidateAllowed[electionId][candidates[i].id] = true;
+            electionCandidates[electionId].push(candidates[i]);
 
             emit CandidateAdded(
                 electionId,
@@ -582,16 +715,20 @@ contract ZKVoting {
                 candidates[i].name
             );
         }
+    }
 
+    function _emitVoteCreated(
+        uint256 electionId,
+        string calldata title,
+        string calldata description
+    )
+        private
+    {
         emit VoteCreated(
             electionId,
             msg.sender,
             title,
             description
-        );
-
-        emit VoteApproved(
-            electionId
         );
     }
 
@@ -678,6 +815,45 @@ contract ZKVoting {
         );
     }
 
+    function getRegistrationTimes(
+        uint256 electionId
+    )
+        external
+        view
+        voteExists(electionId)
+        returns (
+            uint64 registrationStartTime,
+            uint64 registrationEndTime
+        )
+    {
+        Election storage e =
+            elections[electionId];
+
+        return (
+            e.registrationStartTime,
+            e.registrationEndTime
+        );
+    }
+
+    function getParticipantStatus(
+        uint256 electionId,
+        address participant
+    )
+        external
+        view
+        voteExists(electionId)
+        returns (bool registered, bool voted)
+    {
+        registered =
+            registeredParticipant[electionId][participant];
+
+        voted = registered && nullifierUsed[
+            electionId
+        ][
+            participantNullifierHash[electionId][participant]
+        ];
+    }
+
     function getVoteStatus(
         uint256 electionId
     )
@@ -694,10 +870,21 @@ contract ZKVoting {
         Election storage e =
             elections[electionId];
 
+        bool isVotingActive =
+            (
+                block.timestamp >= e.startTime &&
+                block.timestamp < e.endTime &&
+                !e.ended
+            );
+
+        bool hasEnded =
+            e.ended ||
+            block.timestamp >= e.endTime;
+
         return (
             e.proposalApproved,
-            e.votingStarted,
-            e.ended,
+            isVotingActive,
+            hasEnded,
             e.finalized
         );
     }
@@ -773,82 +960,144 @@ contract ZKVoting {
     // =============================================================
 
     /**
-     * The creator of an individual vote manages its eligibility list.
-     *
-     * Governance is NOT required.
-     *
-     * Registration closes automatically once voting starts.
+     * Legacy issuer-only registration entry point. A participant cannot
+     * submit an arbitrary identity commitment through this function.
      */
     function registerParticipant(
         uint256 electionId,
         address participant,
         uint256 credentialLeaf,
-        uint256 nullifierHash
+        uint256 nullifierHash,
+        bytes32 identityHash
     )
         external
         voteExists(electionId)
-        onlyVoteCreator(electionId)
+        onlyIdentityIssuer
     {
-        Election storage e =
-            elections[electionId];
+        _registerParticipant(
+            electionId,
+            participant,
+            credentialLeaf,
+            nullifierHash,
+            identityHash
+        );
+    }
 
+    /**
+     * Allows the participant to submit their registration transaction while
+     * requiring an issuer signature over this election, wallet, and identity.
+     */
+    function registerVerifiedParticipant(
+        uint256 electionId,
+        address participant,
+        uint256 credentialLeaf,
+        uint256 nullifierHash,
+        bytes32 identityHash,
+        bytes calldata issuerSignature
+    )
+        external
+        voteExists(electionId)
+    {
         require(
-            !e.votingStarted,
-            "Voting already started"
+            msg.sender == participant,
+            "Not participant"
+        );
+        require(
+            _recoverIdentityIssuer(
+                electionId,
+                participant,
+                identityHash,
+                issuerSignature
+            ) == identityIssuer,
+            "Invalid identity issuer signature"
         );
 
+        _registerParticipant(
+            electionId,
+            participant,
+            credentialLeaf,
+            nullifierHash,
+            identityHash
+        );
+    }
+
+    function _recoverIdentityIssuer(
+        uint256 electionId,
+        address participant,
+        bytes32 identityHash,
+        bytes calldata signature
+    )
+        private
+        view
+        returns (address)
+    {
         require(
-            block.timestamp <
-                e.startTime,
-            "Registration closed"
+            signature.length == 65,
+            "Invalid identity issuer signature"
         );
 
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := calldataload(signature.offset)
+            s := calldataload(add(signature.offset, 32))
+            v := byte(0, calldataload(add(signature.offset, 64)))
+        }
         require(
-            participant != address(0),
-            "Zero participant"
+            (v == 27 || v == 28) && uint256(s) <= SECP256K1_HALF_ORDER,
+            "Invalid identity issuer signature"
         );
 
-        require(
-            !registeredParticipant[
-                electionId
-            ][participant],
-            "Participant already registered"
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                IDENTITY_DOMAIN_TYPEHASH,
+                IDENTITY_NAME_HASH,
+                IDENTITY_VERSION_HASH,
+                block.chainid,
+                address(this)
+            )
+        );
+        bytes32 structHash = keccak256(
+            abi.encode(
+                IDENTITY_ATTESTATION_TYPEHASH,
+                electionId,
+                participant,
+                identityHash
+            )
+        );
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", domainSeparator, structHash)
         );
 
-        require(
-            credentialLeaf != 0,
-            "Zero credential"
-        );
+        return ecrecover(digest, v, r, s);
+    }
 
-        require(
-            nullifierHash != 0,
-            "Zero nullifier"
-        );
+    function _registerParticipant(
+        uint256 electionId,
+        address participant,
+        uint256 credentialLeaf,
+        uint256 nullifierHash,
+        bytes32 identityHash
+    )
+        private
+    {
+        Election storage e = elections[electionId];
 
-        require(
-            !eligibilityLeafUsed[
-                electionId
-            ][credentialLeaf],
-            "Credential already used"
-        );
+        require(!e.votingStarted, "Voting already started");
+        require(block.timestamp < e.registrationEndTime, "Registration closed");
+        require(block.timestamp >= e.registrationStartTime, "Registration not open");
+        require(participant != address(0), "Zero participant");
+        require(!registeredParticipant[electionId][participant], "Participant already registered");
+        require(identityHash != bytes32(0), "Zero identity hash");
+        require(!identityRegistered[electionId][identityHash], "Identity already registered");
+        require(credentialLeaf != 0, "Zero credential");
+        require(nullifierHash != 0, "Zero nullifier");
+        require(!eligibilityLeafUsed[electionId][credentialLeaf], "Credential already used");
+        require(!eligibilityNullifierUsed[electionId][nullifierHash], "Nullifier already used");
+        require(participants[electionId].length < MAX_PARTICIPANTS, "Maximum participants reached");
 
-        require(
-            !eligibilityNullifierUsed[
-                electionId
-            ][nullifierHash],
-            "Nullifier already used"
-        );
-
-        require(
-            participants[electionId].length <
-                MAX_PARTICIPANTS,
-            "Maximum participants reached"
-        );
-
-        uint256 treeIndex =
-            participants[electionId]
-                .length;
-
+        uint256 treeIndex = participants[electionId].length;
         participants[electionId].push(
             Participant({
                 wallet: participant,
@@ -858,49 +1107,17 @@ contract ZKVoting {
             })
         );
 
-        registeredParticipant[
-            electionId
-        ][participant] = true;
+        registeredParticipant[electionId][participant] = true;
+        identityRegistered[electionId][identityHash] = true;
+        participantCredentialLeaf[electionId][participant] = credentialLeaf;
+        participantNullifierHash[electionId][participant] = nullifierHash;
+        participantIndex[electionId][participant] = treeIndex;
+        eligibilityLeaves[electionId][treeIndex] = credentialLeaf;
+        eligibilityLeafUsed[electionId][credentialLeaf] = true;
+        eligibilityNullifierUsed[electionId][nullifierHash] = true;
 
-        participantCredentialLeaf[
-            electionId
-        ][participant] =
-            credentialLeaf;
-
-        participantNullifierHash[
-            electionId
-        ][participant] =
-            nullifierHash;
-
-        participantIndex[
-            electionId
-        ][participant] =
-            treeIndex;
-
-        eligibilityLeaves[
-            electionId
-        ][treeIndex] =
-            credentialLeaf;
-
-        eligibilityLeafUsed[
-            electionId
-        ][credentialLeaf] =
-            true;
-
-        eligibilityNullifierUsed[
-            electionId
-        ][nullifierHash] =
-            true;
-
-        uint256 root =
-            _eligibilityRoot(
-                electionId
-            );
-
-        elections[
-            electionId
-        ].eligibilityRoot =
-            root;
+        uint256 root = _eligibilityRoot(electionId);
+        e.eligibilityRoot = root;
 
         emit ParticipantRegistered(
             electionId,
@@ -1057,11 +1274,6 @@ contract ZKVoting {
             elections[electionId];
 
         require(
-            e.votingStarted,
-            "Vote not active"
-        );
-
-        require(
             block.timestamp >=
                 e.endTime,
             "Vote still active"
@@ -1142,11 +1354,6 @@ contract ZKVoting {
         );
 
         require(
-            e.votingStarted,
-            "Vote not active"
-        );
-
-        require(
             block.timestamp >=
                 e.startTime,
             "Vote not started"
@@ -1155,20 +1362,6 @@ contract ZKVoting {
         require(
             block.timestamp < e.endTime,
             "Vote ended"
-        );
-
-        /*
-         * Current ZK circuit still uses wallet-linked registration.
-         *
-         * This will be the next privacy upgrade:
-         * remove the public wallet/credential association while
-         * retaining ZK eligibility and nullifier enforcement.
-         */
-        require(
-            registeredParticipant[
-                electionId
-            ][msg.sender],
-            "Not registered"
         );
 
         uint256 nullifierHash =
@@ -1205,14 +1398,6 @@ contract ZKVoting {
         require(
             voteCommitment != 0,
             "Zero commitment"
-        );
-
-        require(
-            participantNullifierHash[
-                electionId
-            ][msg.sender] ==
-                nullifierHash,
-            "Invalid nullifier"
         );
 
         require(

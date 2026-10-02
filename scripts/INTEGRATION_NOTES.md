@@ -12,8 +12,15 @@ Public signal order emitted by Circom is fixed:
 
 The circuit privately proves both:
 
-- credential membership in `eligibilityRoot`, and
+- poll-bound credential membership in `eligibilityRoot`, where the leaf is
+	`Poseidon(credential, electionId)`, and
 - candidate membership in `candidateRoot`.
+
+The circuit derives its public nullifier as
+`Poseidon(Poseidon(credential, electionId), 1)`. The inner commitment binds
+the eligibility leaf to one election; the `1` tag separates the nullifier
+domain from the leaf commitment. Registration tooling must use these exact
+formulas or the Groth16 proof will not match the stored leaf/nullifier.
 
 The public `scopeRoot` binds those two election-specific roots:
 
